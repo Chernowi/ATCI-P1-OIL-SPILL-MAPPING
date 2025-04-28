@@ -1,0 +1,9 @@
+numpy
+torch
+matplotlib
+pydantic
+tqdm
+imageio
+Pillow
+tensorboard
+scipy
