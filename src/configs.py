@@ -14,7 +14,7 @@ class SACConfig(BaseModel):
     hidden_dims: List[int] = Field([256, 256], description="List of hidden layer dimensions for MLP part") # Updated default
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
     log_std_max: int = Field(2, description="Maximum log std for action distribution")
-    lr: float = Field(1e-4, description="Learning rate") # Updated default
+    lr: float = Field(1e-6, description="Learning rate") # Updated default
     gamma: float = Field(0.99, description="Discount factor")
     tau: float = Field(0.001, description="Target network update rate") # Updated default
     alpha: float = Field(0.2, description="Temperature parameter (Initial value if auto-tuning)") # Updated default (was 0.2)
@@ -66,7 +66,7 @@ class MapperConfig(BaseModel):
 
 class TrainingConfig(BaseModel):
     """Configuration for training"""
-    num_episodes: int = Field(2000, description="Number of episodes to train")
+    num_episodes: int = Field(30000, description="Number of episodes to train")
     max_steps: int = Field(300, description="Maximum steps per episode")
     batch_size: int = Field(128, description="Batch size for training (SAC/TSAC: trajectories, PPO: transitions)") # Updated default
     save_interval: int = Field(200, description="Interval (in episodes) for saving models")
@@ -74,7 +74,7 @@ class TrainingConfig(BaseModel):
     # --- Keep single models_dir, set per specific config ---
     models_dir: str = Field("models/default_mapping/", description="Directory for saving models")
     learning_starts: int = Field(8000, description="Number of steps to collect before starting SAC/TSAC training updates")
-    train_freq: int = Field(1, description="Update the policy every n environment steps (SAC/TSAC)") # Updated default
+    train_freq: int = Field(4, description="Update the policy every n environment steps (SAC/TSAC)") # Updated default
     gradient_steps: int = Field(1, description="How many gradient steps to perform when training frequency is met (SAC/TSAC)") # Updated default
 
 class EvaluationConfig(BaseModel):
@@ -138,11 +138,11 @@ class WorldConfig(BaseModel):
     success_iou_threshold: float = Field(0.90, description="IoU between estimated and true spill above which the episode is successful")
 
     # --- Reward Function Parameters (NEW/UPDATED) ---
-    base_iou_reward_scale: float = Field(50.0, description="Scaling factor for CURRENT IoU-based reward (reward = scale * IoU)")
-    iou_improvement_scale: float = Field(150.0, description="Scaling factor for IoU *improvement* reward (reward = scale * max(0, delta_IoU))") # NEW
-    step_penalty: float = Field(0.02, description="Penalty subtracted each step (reduced default)") # Updated default
-    success_bonus: float = Field(50.0, description="Bonus reward added upon reaching success_iou_threshold (reduced default)") # Updated default
-    uninitialized_mapper_penalty: float = Field(0.5, description="Penalty applied if the mapper hasn't produced a valid estimate yet") # Kept default
+    base_iou_reward_scale: float = Field(1.0, description="Scaling factor for CURRENT IoU-based reward (reward = scale * IoU)") # WAS 50.0
+    iou_improvement_scale: float = Field(1.5, description="Scaling factor for IoU *improvement* reward (reward = scale * max(0, delta_IoU))") # WAS 150.0
+    step_penalty: float = Field(0.05, description="Penalty subtracted each step (kept default)") # WAS 0.02
+    success_bonus: float = Field(10.0, description="Bonus reward added upon reaching success_iou_threshold") # WAS 50.0
+    uninitialized_mapper_penalty: float = Field(0.05, description="Penalty applied if the mapper hasn't produced a valid estimate yet (kept default)") # WAS 0.5
 
     mapper_config: MapperConfig = Field(default_factory=MapperConfig, description="Configuration for the mapper")
 
@@ -172,18 +172,11 @@ class DefaultConfig(BaseModel):
 default_mapping_config = DefaultConfig()
 default_mapping_config.algorithm = "sac"
 default_mapping_config.training.models_dir = "models/sac_mapping/"
-# --- Example Overrides for SAC with New Reward ---
-# default_mapping_config.world.base_iou_reward_scale = 75.0
-# default_mapping_config.world.iou_improvement_scale = 200.0
-# default_mapping_config.world.step_penalty = 0.01
-# default_mapping_config.world.success_bonus = 75.0
-# default_mapping_config.sac.lr = 1e-4 # Already default
-# default_mapping_config.sac.tau = 0.001 # Already default
-# default_mapping_config.sac.hidden_dims = [256, 256] # Already default
-# default_mapping_config.training.batch_size = 128 # Already default
-# default_mapping_config.training.gradient_steps = 1 # Already default
-# default_mapping_config.training.train_freq = 1 # Already default
 
+sac_rnn_config = DefaultConfig()
+sac_rnn_config.algorithm = "sac"
+sac_rnn_config.sac.use_rnn = True
+sac_rnn_config.training.models_dir = "models/sac_rnn_mapping/"
 
 # PPO config
 ppo_mapping_config = DefaultConfig()
@@ -203,7 +196,7 @@ tsac_mapping_config.world.trajectory_length = 5 # Example override
 # Dictionary to access configurations by name
 CONFIGS: Dict[str, DefaultConfig] = {
     "default_mapping": default_mapping_config, # Default is SAC
-    "sac_mapping": default_mapping_config,    # Explicitly name SAC config
+    "sac_rnn_mapping":  sac_rnn_config,
     "ppo_mapping": ppo_mapping_config,
     "tsac_mapping": tsac_mapping_config,
 }
