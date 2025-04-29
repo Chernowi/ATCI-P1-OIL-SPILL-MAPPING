@@ -811,7 +811,7 @@ def evaluate_tsac(agent: TSAC, config: DefaultConfig):
         if success: success_count += 1
         status = "Success!" if success else "Failure."
 
-        if world.done and not world.current_step >= world_config.max_steps: # Terminated early
+        if world.done and not world.current_step >= config.training.max_steps: # Terminated early
             print(f"  Episode {episode+1}: Terminated Step {world.current_step}. Final IoU: {final_iou:.3f}. {status}")
         else: # Max steps reached
              print(f"  Episode {episode+1}: Finished (Step {world.current_step}). Final IoU: {final_iou:.3f}. {status}")
