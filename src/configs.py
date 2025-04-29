@@ -1,5 +1,3 @@
-# --- START OF FILE configs.py ---
-
 from typing import Dict, Literal, Tuple, List, Any
 from pydantic import BaseModel, Field
 import math
@@ -13,13 +11,13 @@ class SACConfig(BaseModel):
     """Configuration for the SAC agent"""
     state_dim: int = Field(CORE_STATE_DIM, description="Dimension of the basic state tuple (sensors + coords)")
     action_dim: int = Field(CORE_ACTION_DIM, description="Action dimension (yaw_change)")
-    hidden_dims: List[int] = Field([64, 64], description="List of hidden layer dimensions for MLP part")
+    hidden_dims: List[int] = Field([256, 256], description="List of hidden layer dimensions for MLP part") # Updated default
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
     log_std_max: int = Field(2, description="Maximum log std for action distribution")
-    lr: float = Field(1e-5, description="Learning rate")
+    lr: float = Field(1e-4, description="Learning rate") # Updated default
     gamma: float = Field(0.99, description="Discount factor")
-    tau: float = Field(0.005, description="Target network update rate")
-    alpha: float = Field(0.2, description="Temperature parameter (Initial value if auto-tuning)")
+    tau: float = Field(0.001, description="Target network update rate") # Updated default
+    alpha: float = Field(0.2, description="Temperature parameter (Initial value if auto-tuning)") # Updated default (was 0.2)
     auto_tune_alpha: bool = Field(True, description="Whether to auto-tune the alpha parameter")
     use_rnn: bool = Field(False, description="Whether to use RNN layers in Actor/Critic")
     rnn_type: Literal['lstm', 'gru'] = Field('lstm', description="Type of RNN cell (Only used if use_rnn is True)")
@@ -70,14 +68,14 @@ class TrainingConfig(BaseModel):
     """Configuration for training"""
     num_episodes: int = Field(2000, description="Number of episodes to train")
     max_steps: int = Field(300, description="Maximum steps per episode")
-    batch_size: int = Field(32, description="Batch size for training (SAC/TSAC: trajectories, PPO: transitions)")
+    batch_size: int = Field(128, description="Batch size for training (SAC/TSAC: trajectories, PPO: transitions)") # Updated default
     save_interval: int = Field(200, description="Interval (in episodes) for saving models")
     log_frequency: int = Field(10, description="Frequency (in episodes) for logging to TensorBoard")
     # --- Keep single models_dir, set per specific config ---
     models_dir: str = Field("models/default_mapping/", description="Directory for saving models")
     learning_starts: int = Field(8000, description="Number of steps to collect before starting SAC/TSAC training updates")
-    train_freq: int = Field(30, description="Update the policy every n environment steps (SAC/TSAC)")
-    gradient_steps: int = Field(20, description="How many gradient steps to perform when training frequency is met (SAC/TSAC)")
+    train_freq: int = Field(1, description="Update the policy every n environment steps (SAC/TSAC)") # Updated default
+    gradient_steps: int = Field(1, description="How many gradient steps to perform when training frequency is met (SAC/TSAC)") # Updated default
 
 class EvaluationConfig(BaseModel):
     """Configuration for evaluation"""
@@ -139,11 +137,12 @@ class WorldConfig(BaseModel):
     # --- Termination Conditions ---
     success_iou_threshold: float = Field(0.90, description="IoU between estimated and true spill above which the episode is successful")
 
-    # --- Reward Function Parameters ---
-    iou_reward_scale: float = Field(50.0, description="Scaling factor for IoU-based reward (reward = scale * IoU^2)")
-    step_penalty: float = Field(0.05, description="Penalty subtracted each step")
-    success_bonus: float = Field(200.0, description="Bonus reward added upon reaching success_iou_threshold")
-    uninitialized_mapper_penalty: float = Field(0.5, description="Penalty applied if the mapper hasn't produced a valid estimate yet")
+    # --- Reward Function Parameters (NEW/UPDATED) ---
+    base_iou_reward_scale: float = Field(50.0, description="Scaling factor for CURRENT IoU-based reward (reward = scale * IoU)")
+    iou_improvement_scale: float = Field(150.0, description="Scaling factor for IoU *improvement* reward (reward = scale * max(0, delta_IoU))") # NEW
+    step_penalty: float = Field(0.02, description="Penalty subtracted each step (reduced default)") # Updated default
+    success_bonus: float = Field(50.0, description="Bonus reward added upon reaching success_iou_threshold (reduced default)") # Updated default
+    uninitialized_mapper_penalty: float = Field(0.5, description="Penalty applied if the mapper hasn't produced a valid estimate yet") # Kept default
 
     mapper_config: MapperConfig = Field(default_factory=MapperConfig, description="Configuration for the mapper")
 
@@ -162,7 +161,6 @@ class DefaultConfig(BaseModel):
     cuda_device: str = Field("cuda:0", description="CUDA device to use (e.g., 'cuda:0', 'cuda:1', 'cpu')")
     algorithm: str = Field("sac", description="RL algorithm to use ('sac', 'ppo', or 'tsac')")
 
-    # --- Removed dynamic models_dir update ---
     # --- Pass mapper config to world config ---
     def model_post_init(self, __context):
          self.world.mapper_config = self.mapper
@@ -174,6 +172,18 @@ class DefaultConfig(BaseModel):
 default_mapping_config = DefaultConfig()
 default_mapping_config.algorithm = "sac"
 default_mapping_config.training.models_dir = "models/sac_mapping/"
+# --- Example Overrides for SAC with New Reward ---
+# default_mapping_config.world.base_iou_reward_scale = 75.0
+# default_mapping_config.world.iou_improvement_scale = 200.0
+# default_mapping_config.world.step_penalty = 0.01
+# default_mapping_config.world.success_bonus = 75.0
+# default_mapping_config.sac.lr = 1e-4 # Already default
+# default_mapping_config.sac.tau = 0.001 # Already default
+# default_mapping_config.sac.hidden_dims = [256, 256] # Already default
+# default_mapping_config.training.batch_size = 128 # Already default
+# default_mapping_config.training.gradient_steps = 1 # Already default
+# default_mapping_config.training.train_freq = 1 # Already default
+
 
 # PPO config
 ppo_mapping_config = DefaultConfig()

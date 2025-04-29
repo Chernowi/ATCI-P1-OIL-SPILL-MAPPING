@@ -35,6 +35,7 @@ class World():
         # World state variables
         self.reward: float = 0.0
         self.iou: float = 0.0 # Intersection over Union metric
+        self.previous_iou: float = 0.0 # Store IoU from previous step
         self.done: bool = False
         self.current_step: int = 0
 
@@ -50,6 +51,7 @@ class World():
         self.done = False
         self.reward = 0.0
         self.iou = 0.0
+        self.previous_iou = 0.0 # Reset previous IoU
 
         # --- Initialize True Oil Spill ---
         spill_cfg = self.world_config.oil_spill
@@ -95,6 +97,7 @@ class World():
              self.mapper.add_measurement(loc, read)
         self.mapper.estimate_spill()
         self._calculate_iou() # Calculate initial IoU
+        self.previous_iou = self.iou # Set previous IoU for the first step calculation
 
         return self.encode_state()
 
@@ -181,15 +184,16 @@ class World():
             # Return current state without advancing time if already done
             return self.encode_state()
 
-        # 1. Store previous state info for trajectory history
+        # --- Store info needed *before* state changes ---
         prev_basic_state = self._get_basic_state_tuple()
         prev_action = yaw_change_normalized
+        # Grab the reward that was calculated at the END of the previous step (r_t)
         reward_from_previous_step = self.reward
 
-        # 2. Get current sensor readings *before* moving agent
+        # 1. Get sensor readings BEFORE moving (at time t)
         sensor_locs, sensor_reads = self._get_sensor_readings()
 
-        # 3. Apply action: Update agent velocity and position
+        # 2. Apply action (a_t): Update agent velocity and position
         yaw_change = yaw_change_normalized * self.max_yaw_change
         current_vx, current_vy = self.agent.velocity.x, self.agent.velocity.y
         current_heading = math.atan2(current_vy, current_vx)
@@ -199,63 +203,76 @@ class World():
         new_vy = self.agent_speed * math.sin(new_heading)
         self.agent.velocity = Velocity(new_vx, new_vy)
         self.agent.update_position(self.dt)
+        # Agent is now at position for time t+1
 
-        # 4. Update Mapper with measurements taken *before* moving
+        # 3. Update Mapper with measurements taken BEFORE moving (at time t)
         for loc, read in zip(sensor_locs, sensor_reads):
             self.mapper.add_measurement(loc, read)
-        self.mapper.estimate_spill()
+        self.mapper.estimate_spill() # Estimate potentially updated based on readings at t
 
-        # 5. Calculate IoU based on NEW estimate
-        self._calculate_iou()
+        # --- State at t+1 is now determined (new agent pos, potentially new estimate) ---
 
-        # 6. Calculate reward r_{t+1} based on the state at t+1
+        # 4. Calculate IoU based on NEW estimate (IoU at t+1)
+        self._calculate_iou() # Updates self.iou based on state at t+1
+
+        # 5. Calculate reward r_{t+1} based on the state at t+1 and the change from t
         if training:
-            self._calculate_reward()
+            self._calculate_reward() # Uses self.iou (current) and self.previous_iou
         else:
-            self.reward = 0.0 # Reset reward for next step if not training
+            self.reward = 0.0 # Reset reward calculation for next step if not training
 
-        # 7. Check termination conditions based on state at t+1
+        # 6. Check termination conditions based on state at t+1
         self.current_step += 1
         success = self.iou >= self.world_config.success_iou_threshold
-        # --- Removed max_steps check here ---
-        # Done is true if success OR if the caller indicated this is the terminal step
         self.done = success or terminal_step
 
-        if success and training and not self.done: # Add bonus only if newly successful
-             # Correction: Apply bonus *after* setting done flag if success is the reason
-             if self.done and not terminal_step: # Check if success caused termination
-                self.reward += self.world_config.success_bonus
+        # Apply success bonus if applicable (using reward calculated in _calculate_reward)
+        if success and training:
+             if self.done and not terminal_step: # Check if success caused termination this step
+                 self.reward += self.world_config.success_bonus # Add bonus on top
 
-
-        # 8. Update trajectory history with [s_t, a_t, r_t]
+        # 7. Update trajectory history with [s_t, a_t, r_t]
+        # Use the reward that was calculated *at the end of the previous step*
         current_feature_vector = np.concatenate([
             np.array(prev_basic_state, dtype=np.float32),
             np.array([prev_action], dtype=np.float32),
-            np.array([reward_from_previous_step], dtype=np.float32)
+            np.array([reward_from_previous_step], dtype=np.float32) # Reward corresponding to s_t, a_t
         ])
         if len(current_feature_vector) != self.feature_dim:
              raise ValueError(f"Feature vector dim mismatch. Expected {self.feature_dim}, got {len(current_feature_vector)}")
         self._trajectory_history.append(current_feature_vector)
 
+        # 8. Update previous_iou for the *next* step's calculation
+        # self.iou holds the value for time t+1, which becomes previous_iou for next step
+        self.previous_iou = self.iou
+
         return self.encode_state() # Return the state dict representing s_{t+1}
 
     def _calculate_reward(self):
         """
-        Calculate reward r_{t+1} based on the state resulting from action a_t.
+        Calculate reward r_{t+1} based on state at t+1 and change from t.
+        Uses self.iou (current IoU at t+1) and self.previous_iou (IoU at t).
         """
-        self.reward = 0.0
+        # Store current IoU before potentially resetting reward
+        current_iou_value = self.iou # IoU calculated based on state at t+1
 
+        self.reward = 0.0 # Start fresh for reward r_{t+1}
+
+        # Penalty for not having an estimate
         if self.mapper.estimated_spill is None:
             self.reward -= self.world_config.uninitialized_mapper_penalty
         else:
-            # Reward based on IoU (non-linear scaling)
-            self.reward += self.world_config.iou_reward_scale * (self.iou ** 2)
+            # Reward for current IoU level (linear scaling)
+            self.reward += self.world_config.base_iou_reward_scale * current_iou_value
 
-        # Apply step penalty
-        self.reward -= self.world_config.step_penalty
+            # Reward for IoU improvement (IoU at t+1 vs IoU at t)
+            iou_delta = current_iou_value - self.previous_iou
+            self.reward += self.world_config.iou_improvement_scale * max(0, iou_delta)
 
-        # Note: Success bonus is added in the step function *after* self.done is set
+            # Apply step penalty (always applies unless uninitialized penalty was given)
+            self.reward -= self.world_config.step_penalty
 
+        # Note: Success bonus is added externally in the step function based on the final reward value
 
     def encode_state(self) -> Dict[str, Any]:
         """
@@ -266,11 +283,14 @@ class World():
         full_trajectory = np.array(self._trajectory_history, dtype=np.float32)
 
         if full_trajectory.shape != (self.trajectory_length, self.feature_dim):
+             # Attempt to recover if deque length is wrong (e.g., after load)
              print(f"Warning: Encoded trajectory shape mismatch. Got {full_trajectory.shape}, expected {(self.trajectory_length, self.feature_dim)}. Reinitializing history.")
-             self._initialize_trajectory_history()
+             self._initialize_trajectory_history() # This fills with initial state
+             # We might lose recent history here, but it prevents crashes.
+             # A better solution might involve padding/truncating if possible.
              full_trajectory = np.array(self._trajectory_history, dtype=np.float32)
              if full_trajectory.shape != (self.trajectory_length, self.feature_dim):
-                  raise ValueError("Failed to recover trajectory history shape.")
+                  raise ValueError(f"Failed to recover trajectory history shape. Expected {(self.trajectory_length, self.feature_dim)}")
 
 
         return {
