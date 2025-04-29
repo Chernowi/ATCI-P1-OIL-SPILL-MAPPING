@@ -3,21 +3,38 @@ from pydantic import BaseModel, Field
 import math
 
 # Core dimensions for Oil Spill Mapping
-CORE_STATE_DIM = 7  # 5 sensor booleans (0/1) + agent_x + agent_y
+# CORE_STATE_DIM = 7  # Original: 5 sensor booleans (0/1) + agent_x + agent_y
+ENHANCED_STATE_DIM = 13 # New: 5 sensors + agent_x + agent_y + heading + map_exists + rel_cx + rel_cy + est_radius + dist_boundary
 CORE_ACTION_DIM = 1 # yaw_change_normalized
 TRAJECTORY_REWARD_DIM = 1 # Reward stored per step
 
+# --- State Feature Indices (for clarity) ---
+# Based on ENHANCED_STATE_DIM = 13
+SENSOR_INDICES = slice(0, 5)
+AGENT_X_INDEX = 5
+AGENT_Y_INDEX = 6
+HEADING_INDEX = 7
+MAP_EXISTS_INDEX = 8
+REL_CENTER_X_INDEX = 9
+REL_CENTER_Y_INDEX = 10
+EST_RADIUS_INDEX = 11
+DIST_BOUNDARY_INDEX = 12
+# Action index in trajectory: 13
+# Reward index in trajectory: 14
+# --- End Indices ---
+
+
 class SACConfig(BaseModel):
     """Configuration for the SAC agent"""
-    state_dim: int = Field(CORE_STATE_DIM, description="Dimension of the basic state tuple (sensors + coords)")
+    state_dim: int = Field(ENHANCED_STATE_DIM, description="Dimension of the enhanced state tuple") # Use new dim
     action_dim: int = Field(CORE_ACTION_DIM, description="Action dimension (yaw_change)")
-    hidden_dims: List[int] = Field([256, 256], description="List of hidden layer dimensions for MLP part") # Updated default
+    hidden_dims: List[int] = Field([256, 256], description="List of hidden layer dimensions for MLP part")
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
     log_std_max: int = Field(2, description="Maximum log std for action distribution")
-    lr: float = Field(1e-6, description="Learning rate") # Updated default
+    lr: float = Field(1e-6, description="Learning rate")
     gamma: float = Field(0.99, description="Discount factor")
-    tau: float = Field(0.001, description="Target network update rate") # Updated default
-    alpha: float = Field(0.2, description="Temperature parameter (Initial value if auto-tuning)") # Updated default (was 0.2)
+    tau: float = Field(0.001, description="Target network update rate")
+    alpha: float = Field(0.2, description="Temperature parameter (Initial value if auto-tuning)")
     auto_tune_alpha: bool = Field(True, description="Whether to auto-tune the alpha parameter")
     use_rnn: bool = Field(False, description="Whether to use RNN layers in Actor/Critic")
     rnn_type: Literal['lstm', 'gru'] = Field('lstm', description="Type of RNN cell (Only used if use_rnn is True)")
@@ -26,6 +43,7 @@ class SACConfig(BaseModel):
 
 class TSACConfig(SACConfig):
     """Configuration for the Transformer-SAC agent, inheriting from SACConfig"""
+    state_dim: int = Field(ENHANCED_STATE_DIM, description="Dimension of the enhanced state tuple") # Use new dim
     use_rnn: bool = Field(False, description="Ensure RNN is disabled for T-SAC's Transformer Critic")
     embedding_dim: int = Field(128, description="Embedding dimension for states and actions in Transformer Critic")
     transformer_n_layers: int = Field(2, description="Number of Transformer encoder layers in Critic")
@@ -37,7 +55,7 @@ class TSACConfig(SACConfig):
 
 class PPOConfig(BaseModel):
     """Configuration for the PPO agent"""
-    state_dim: int = Field(CORE_STATE_DIM, description="Dimension of the basic state tuple (sensors + coords)")
+    state_dim: int = Field(ENHANCED_STATE_DIM, description="Dimension of the enhanced state tuple") # Use new dim
     action_dim: int = Field(CORE_ACTION_DIM, description="Action dimension (yaw_change)")
     hidden_dim: int = Field(256, description="Hidden layer dimension")
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
@@ -68,14 +86,13 @@ class TrainingConfig(BaseModel):
     """Configuration for training"""
     num_episodes: int = Field(30000, description="Number of episodes to train")
     max_steps: int = Field(300, description="Maximum steps per episode")
-    batch_size: int = Field(128, description="Batch size for training (SAC/TSAC: trajectories, PPO: transitions)") # Updated default
+    batch_size: int = Field(128, description="Batch size for training (SAC/TSAC: trajectories, PPO: transitions)")
     save_interval: int = Field(200, description="Interval (in episodes) for saving models")
     log_frequency: int = Field(10, description="Frequency (in episodes) for logging to TensorBoard")
-    # --- Keep single models_dir, set per specific config ---
     models_dir: str = Field("models/default_mapping/", description="Directory for saving models")
     learning_starts: int = Field(8000, description="Number of steps to collect before starting SAC/TSAC training updates")
-    train_freq: int = Field(4, description="Update the policy every n environment steps (SAC/TSAC)") # Updated default
-    gradient_steps: int = Field(1, description="How many gradient steps to perform when training frequency is met (SAC/TSAC)") # Updated default
+    train_freq: int = Field(4, description="Update the policy every n environment steps (SAC/TSAC)")
+    gradient_steps: int = Field(1, description="How many gradient steps to perform when training frequency is met (SAC/TSAC)")
 
 class EvaluationConfig(BaseModel):
     """Configuration for evaluation"""
@@ -132,17 +149,18 @@ class WorldConfig(BaseModel):
     oil_spill: OilSpillConfig = Field(default_factory=OilSpillConfig, description="True oil spill configuration")
 
     trajectory_length: int = Field(10, description="Number of steps (N) included in the trajectory state (SAC/TSAC)")
-    trajectory_feature_dim: int = Field(CORE_STATE_DIM + CORE_ACTION_DIM + TRAJECTORY_REWARD_DIM, description="Dimension of features per step in trajectory state (basic_state + prev_action + prev_reward)") # 7+1+1=9
+    # Updated trajectory feature dimension to match new state dim
+    trajectory_feature_dim: int = Field(ENHANCED_STATE_DIM + CORE_ACTION_DIM + TRAJECTORY_REWARD_DIM, description="Dimension of features per step in trajectory state (enhanced_state + prev_action + prev_reward)") # 13+1+1=15
 
     # --- Termination Conditions ---
     success_iou_threshold: float = Field(0.90, description="IoU between estimated and true spill above which the episode is successful")
 
-    # --- Reward Function Parameters (NEW/UPDATED) ---
-    base_iou_reward_scale: float = Field(1.0, description="Scaling factor for CURRENT IoU-based reward (reward = scale * IoU)") # WAS 50.0
-    iou_improvement_scale: float = Field(1.5, description="Scaling factor for IoU *improvement* reward (reward = scale * max(0, delta_IoU))") # WAS 150.0
-    step_penalty: float = Field(0.05, description="Penalty subtracted each step (kept default)") # WAS 0.02
-    success_bonus: float = Field(10.0, description="Bonus reward added upon reaching success_iou_threshold") # WAS 50.0
-    uninitialized_mapper_penalty: float = Field(0.05, description="Penalty applied if the mapper hasn't produced a valid estimate yet (kept default)") # WAS 0.5
+    # --- Reward Function Parameters ---
+    base_iou_reward_scale: float = Field(1.0, description="Scaling factor for CURRENT IoU-based reward")
+    iou_improvement_scale: float = Field(1.5, description="Scaling factor for IoU *improvement* reward")
+    step_penalty: float = Field(0.05, description="Penalty subtracted each step")
+    success_bonus: float = Field(10.0, description="Bonus reward added upon reaching success_iou_threshold")
+    uninitialized_mapper_penalty: float = Field(0.05, description="Penalty applied if the mapper hasn't produced a valid estimate yet")
 
     mapper_config: MapperConfig = Field(default_factory=MapperConfig, description="Configuration for the mapper")
 
@@ -168,38 +186,37 @@ class DefaultConfig(BaseModel):
 
 # --- Define Specific Configurations ---
 
-# Default config uses SAC and saves to "models/sac_mapping/"
+# Default config uses SAC and saves to "models/sac_mapping/" (Now uses enhanced state)
 default_mapping_config = DefaultConfig()
 default_mapping_config.algorithm = "sac"
-default_mapping_config.training.models_dir = "models/sac_mapping/"
+default_mapping_config.training.models_dir = "models/sac_mapping_enhanced/" # Updated dir name
 
+# SAC RNN config (Now uses enhanced state)
 sac_rnn_config = DefaultConfig()
 sac_rnn_config.algorithm = "sac"
 sac_rnn_config.sac.use_rnn = True
-sac_rnn_config.training.models_dir = "models/sac_rnn_mapping/"
+sac_rnn_config.training.models_dir = "models/sac_rnn_mapping_enhanced/" # Updated dir name
 
-# PPO config
+# PPO config (Now uses enhanced state)
 ppo_mapping_config = DefaultConfig()
 ppo_mapping_config.algorithm = "ppo"
-ppo_mapping_config.training.models_dir = "models/ppo_mapping/"
-# Adjust any other PPO specific parameters here if needed
-# ppo_mapping_config.ppo.steps_per_update = 4096
+ppo_mapping_config.training.models_dir = "models/ppo_mapping_enhanced/" # Updated dir name
 
-# T-SAC config
+# T-SAC config (Now uses enhanced state)
 tsac_mapping_config = DefaultConfig()
 tsac_mapping_config.algorithm = "tsac"
-tsac_mapping_config.training.models_dir = "models/tsac_mapping/"
-tsac_mapping_config.tsac.lr = 1e-4 # Example override
-tsac_mapping_config.world.trajectory_length = 5 # Example override
+tsac_mapping_config.training.models_dir = "models/tsac_mapping_enhanced/" # Updated dir name
+# tsac_mapping_config.tsac.lr = 1e-4 # Example override
+# tsac_mapping_config.world.trajectory_length = 5 # Example override
 
 
 # Dictionary to access configurations by name
 CONFIGS: Dict[str, DefaultConfig] = {
-    "default_mapping": default_mapping_config, # Default is SAC
-    "sac_rnn_mapping":  sac_rnn_config,
-    "ppo_mapping": ppo_mapping_config,
-    "tsac_mapping": tsac_mapping_config,
+    "default_mapping": default_mapping_config, # Default is SAC Enhanced
+    "sac_rnn_mapping":  sac_rnn_config,        # SAC RNN Enhanced
+    "ppo_mapping": ppo_mapping_config,         # PPO Enhanced
+    "tsac_mapping": tsac_mapping_config,       # T-SAC Enhanced
 }
 
 # Example access: CONFIGS["ppo_mapping"].ppo.n_epochs
-# Example access: CONFIGS["sac_mapping"].training.models_dir => "models/sac_mapping/"
+# Example access: CONFIGS["sac_mapping"].training.models_dir => "models/sac_mapping_enhanced/"

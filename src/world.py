@@ -1,5 +1,6 @@
 from world_objects import Object, Location, Velocity, OilSpillCircle
-from configs import WorldConfig, MapperConfig, CORE_STATE_DIM, CORE_ACTION_DIM, TRAJECTORY_REWARD_DIM
+# Use new state dim constant from configs
+from configs import WorldConfig, MapperConfig, ENHANCED_STATE_DIM, CORE_ACTION_DIM, TRAJECTORY_REWARD_DIM
 from mapper import Mapper
 from utils import calculate_iou_circles # Import IoU calculation
 import numpy as np
@@ -14,19 +15,20 @@ class World():
     Represents the oil spill mapping environment.
     Agent uses sensors to detect oil and a Mapper estimates the spill shape.
     Action is yaw_change (normalized float).
-    State is a tuple of sensor readings (booleans) and agent coordinates (x, y).
-    Trajectory state (for SAC/TSAC) includes history of basic state, action, reward.
+    State uses an ENHANCED feature set including map estimate info.
+    Trajectory state (for SAC/TSAC) includes history of enhanced state, action, reward.
     """
     def __init__(self, world_config: WorldConfig):
         self.world_config = world_config
-        self.mapper_config = world_config.mapper_config # Get mapper config from world config
+        self.mapper_config = world_config.mapper_config
         self.dt = world_config.dt
         self.agent_speed = world_config.agent_speed
         self.max_yaw_change = world_config.yaw_angle_range[1]
         self.num_sensors = world_config.num_sensors
         self.sensor_distance = world_config.sensor_distance
         self.trajectory_length = world_config.trajectory_length
-        self.feature_dim = world_config.trajectory_feature_dim # basic_state + action + reward
+        # Use updated feature_dim from config
+        self.feature_dim = world_config.trajectory_feature_dim
 
         self.agent: Object = None
         self.true_spill: OilSpillCircle = None
@@ -34,16 +36,16 @@ class World():
 
         # World state variables
         self.reward: float = 0.0
-        self.iou: float = 0.0 # Intersection over Union metric
-        self.previous_iou: float = 0.0 # Store IoU from previous step
+        self.iou: float = 0.0
+        self.previous_iou: float = 0.0
         self.done: bool = False
         self.current_step: int = 0
 
         # Initialize trajectory history (deque stores feature vectors)
-        # Feature vector: [sensor1..5, agent_x, agent_y, prev_action, prev_reward]
+        # Feature vector: [enhanced_state (13), prev_action (1), prev_reward (1)]
         self._trajectory_history = deque(maxlen=self.trajectory_length)
 
-        self.reset() # Initialize agent, spill, mapper, history
+        self.reset()
 
     def reset(self):
         """Resets the environment to a new initial state."""
@@ -51,7 +53,7 @@ class World():
         self.done = False
         self.reward = 0.0
         self.iou = 0.0
-        self.previous_iou = 0.0 # Reset previous IoU
+        self.previous_iou = 0.0
 
         # --- Initialize True Oil Spill ---
         spill_cfg = self.world_config.oil_spill
@@ -89,15 +91,17 @@ class World():
         self.mapper.reset()
 
         # --- Initialize Trajectory History ---
-        self._initialize_trajectory_history()
-
-        # Perform initial sensor reading and mapper update for the very first state
+        # Do initial sensor reading/mapper update *before* initializing history
+        # This ensures the first element in the history has potentially valid map info
         sensor_locs, sensor_reads = self._get_sensor_readings()
         for loc, read in zip(sensor_locs, sensor_reads):
              self.mapper.add_measurement(loc, read)
         self.mapper.estimate_spill()
-        self._calculate_iou() # Calculate initial IoU
-        self.previous_iou = self.iou # Set previous IoU for the first step calculation
+        self._calculate_iou()
+        self.previous_iou = self.iou
+
+        # Now initialize history with the state *after* the first mapper update
+        self._initialize_trajectory_history()
 
         return self.encode_state()
 
@@ -107,12 +111,9 @@ class World():
         sensor_locations = []
         agent_loc = self.agent.location
         agent_heading = self.agent.get_heading()
-        # Evenly space sensors around the agent
         angle_step = 2 * math.pi / self.num_sensors
         for i in range(self.num_sensors):
-            # Angle relative to agent's heading (0 degrees is straight ahead)
-            relative_angle = (i * angle_step) - (math.pi / 2) # Start with sensor 0 at agent's left
-            # Absolute angle in world frame
+            relative_angle = (i * angle_step) - (math.pi / 2)
             sensor_angle = agent_heading + relative_angle
             sensor_x = agent_loc.x + self.sensor_distance * math.cos(sensor_angle)
             sensor_y = agent_loc.y + self.sensor_distance * math.sin(sensor_angle)
@@ -136,58 +137,99 @@ class World():
             )
 
     def _get_basic_state_tuple(self) -> Tuple:
-        """ Encodes the instantaneous basic state observation. """
+        """ Encodes the instantaneous ENHANCED state observation. """
         sensor_locs, sensor_readings_bool = self._get_sensor_readings()
         sensor_readings_float = [1.0 if read else 0.0 for read in sensor_readings_bool]
         agent_loc = self.agent.location
+        agent_heading = self.agent.get_heading() # Agent's current heading
 
-        state_list = sensor_readings_float + [agent_loc.x, agent_loc.y]
-        if len(state_list) != CORE_STATE_DIM:
-             raise ValueError(f"Basic state dimension mismatch. Expected {CORE_STATE_DIM}, got {len(state_list)}")
+        # Map related features - with defaults if no estimate exists
+        map_exists_flag = 0.0
+        rel_center_x = 0.0
+        rel_center_y = 0.0
+        est_radius = 0.0
+        dist_boundary = 0.0 # Default (could also use a large value)
+
+        if self.mapper.estimated_spill is not None:
+            map_exists_flag = 1.0
+            est_center = self.mapper.estimated_spill.center
+            est_radius = self.mapper.estimated_spill.radius
+            rel_center_x = est_center.x - agent_loc.x
+            rel_center_y = est_center.y - agent_loc.y
+            dist_to_center = math.sqrt(rel_center_x**2 + rel_center_y**2)
+            # Distance to boundary: positive if outside, negative if inside
+            dist_boundary = dist_to_center - est_radius
+
+        state_list = (
+            sensor_readings_float +                         # 5 features
+            [agent_loc.x, agent_loc.y] +                    # 2 features
+            [agent_heading] +                               # 1 feature
+            [map_exists_flag] +                             # 1 feature
+            [rel_center_x, rel_center_y] +                  # 2 features
+            [est_radius] +                                  # 1 feature
+            [dist_boundary]                                 # 1 feature
+        )
+
+        # Ensure the length matches the configured dimension
+        if len(state_list) != ENHANCED_STATE_DIM:
+             raise ValueError(f"Enhanced state dimension mismatch. Expected {ENHANCED_STATE_DIM}, got {len(state_list)}")
+
+        # Check for NaNs before returning
+        if any(math.isnan(x) for x in state_list):
+            print(f"Warning: NaN detected in basic state tuple generation. State: {state_list}")
+            # Replace NaNs with 0 for stability, though this indicates an issue
+            state_list = [0.0 if math.isnan(x) else x for x in state_list]
 
         return tuple(state_list)
 
     def _initialize_trajectory_history(self):
-        """Fills the initial trajectory history with the initial state."""
+        """Fills the initial trajectory history with the current enhanced state."""
         if self.agent is None or self.true_spill is None:
             raise ValueError("Agent and Spill must be initialized before trajectory history.")
 
+        # Get the enhanced state tuple based on the *current* world state
+        # (which includes mapper results from reset)
         initial_basic_state = self._get_basic_state_tuple()
         initial_action = 0.0
-        initial_reward = 0.0
+        initial_reward = 0.0 # Reward is 0 at the very start
 
         initial_feature = np.concatenate([
-            np.array(initial_basic_state, dtype=np.float32),
-            np.array([initial_action], dtype=np.float32),
-            np.array([initial_reward], dtype=np.float32)
+            np.array(initial_basic_state, dtype=np.float32),       # Enhanced state (13)
+            np.array([initial_action], dtype=np.float32),          # Action (1)
+            np.array([initial_reward], dtype=np.float32)           # Reward (1)
         ])
 
         if len(initial_feature) != self.feature_dim:
-            raise ValueError(f"Feature dimension mismatch. Expected {self.feature_dim}, got {len(initial_feature)}")
+            raise ValueError(f"Trajectory feature dimension mismatch. Expected {self.feature_dim}, got {len(initial_feature)}")
 
         self._trajectory_history.clear()
         for _ in range(self.trajectory_length):
+            # Check for NaNs in the feature vector before adding
+            if np.isnan(initial_feature).any():
+                 print("Error: NaN detected in initial feature vector during history initialization!")
+                 # Handle error appropriately, maybe default to zeros?
+                 initial_feature = np.zeros(self.feature_dim, dtype=np.float32)
+
             self._trajectory_history.append(initial_feature)
 
 
     def step(self, yaw_change_normalized: float, training: bool = True, terminal_step: bool = False):
         """
-        Advance the world state by one time step.
+        Advance the world state by one time step using the ENHANCED state.
         Args:
             yaw_change_normalized (float): The normalized yaw change action [-1, 1].
             training (bool): Flag indicating if rewards should be calculated.
-            terminal_step (bool): Flag indicating if this is the forced last step
-                                  due to max_steps being reached in the caller loop.
+            terminal_step (bool): Flag indicating if this is the forced last step.
         """
         if self.done:
             print("Warning: step() called after environment is done.")
-            # Return current state without advancing time if already done
             return self.encode_state()
 
         # --- Store info needed *before* state changes ---
+        # Get state s_t (enhanced tuple) before taking action
         prev_basic_state = self._get_basic_state_tuple()
         prev_action = yaw_change_normalized
-        # Grab the reward that was calculated at the END of the previous step (r_t)
+        # Get reward r_t calculated at the end of the previous step
         reward_from_previous_step = self.reward
 
         # 1. Get sensor readings BEFORE moving (at time t)
@@ -198,7 +240,7 @@ class World():
         current_vx, current_vy = self.agent.velocity.x, self.agent.velocity.y
         current_heading = math.atan2(current_vy, current_vx)
         new_heading = (current_heading + yaw_change)
-        new_heading = (new_heading + math.pi) % (2 * math.pi) - math.pi # Normalize heading
+        new_heading = (new_heading + math.pi) % (2 * math.pi) - math.pi
         new_vx = self.agent_speed * math.cos(new_heading)
         new_vy = self.agent_speed * math.sin(new_heading)
         self.agent.velocity = Velocity(new_vx, new_vy)
@@ -210,90 +252,96 @@ class World():
             self.mapper.add_measurement(loc, read)
         self.mapper.estimate_spill() # Estimate potentially updated based on readings at t
 
-        # --- State at t+1 is now determined (new agent pos, potentially new estimate) ---
+        # --- State at t+1 is now determined ---
 
         # 4. Calculate IoU based on NEW estimate (IoU at t+1)
-        self._calculate_iou() # Updates self.iou based on state at t+1
+        self._calculate_iou() # Updates self.iou
 
-        # 5. Calculate reward r_{t+1} based on the state at t+1 and the change from t
+        # 5. Calculate reward r_{t+1} based on the state at t+1 and change from t
         if training:
             self._calculate_reward() # Uses self.iou (current) and self.previous_iou
         else:
-            self.reward = 0.0 # Reset reward calculation for next step if not training
+            self.reward = 0.0 # No reward calculation if not training
 
         # 6. Check termination conditions based on state at t+1
         self.current_step += 1
         success = self.iou >= self.world_config.success_iou_threshold
-        self.done = success or terminal_step
+        # Check if max steps reached OR success condition met this step
+        self.done = (self.current_step >= self.world_config.max_steps) or success or terminal_step
 
-        # Apply success bonus if applicable (using reward calculated in _calculate_reward)
-        if success and training:
-             if self.done and not terminal_step: # Check if success caused termination this step
-                 self.reward += self.world_config.success_bonus # Add bonus on top
+
+        # Apply success bonus if applicable (on top of reward calculated in _calculate_reward)
+        # Only add bonus if success was the reason for termination *this* step
+        if success and training and self.done and not terminal_step and not (self.current_step >= self.world_config.max_steps):
+            self.reward += self.world_config.success_bonus
 
         # 7. Update trajectory history with [s_t, a_t, r_t]
-        # Use the reward that was calculated *at the end of the previous step*
+        # Use the state (s_t), action (a_t), and reward (r_t) from *before* the step
         current_feature_vector = np.concatenate([
-            np.array(prev_basic_state, dtype=np.float32),
-            np.array([prev_action], dtype=np.float32),
-            np.array([reward_from_previous_step], dtype=np.float32) # Reward corresponding to s_t, a_t
+            np.array(prev_basic_state, dtype=np.float32),          # Enhanced state s_t
+            np.array([prev_action], dtype=np.float32),             # Action a_t
+            np.array([reward_from_previous_step], dtype=np.float32) # Reward r_t
         ])
         if len(current_feature_vector) != self.feature_dim:
              raise ValueError(f"Feature vector dim mismatch. Expected {self.feature_dim}, got {len(current_feature_vector)}")
+
+        # Check for NaNs before appending
+        if np.isnan(current_feature_vector).any():
+            print(f"Warning: NaN detected in feature vector at step {self.current_step}. Vector: {current_feature_vector}")
+            # Replace NaNs with 0 to prevent issues, but indicates a problem
+            current_feature_vector = np.nan_to_num(current_feature_vector, nan=0.0)
+
         self._trajectory_history.append(current_feature_vector)
 
-        # 8. Update previous_iou for the *next* step's calculation
-        # self.iou holds the value for time t+1, which becomes previous_iou for next step
-        self.previous_iou = self.iou
+        # 8. Update previous_iou for the *next* step's reward calculation
+        self.previous_iou = self.iou # self.iou holds IoU(t+1)
 
-        return self.encode_state() # Return the state dict representing s_{t+1}
+        # 9. Return state dict representing s_{t+1}
+        return self.encode_state() # Includes the newly computed basic_state(t+1) and updated history
 
     def _calculate_reward(self):
         """
         Calculate reward r_{t+1} based on state at t+1 and change from t.
         Uses self.iou (current IoU at t+1) and self.previous_iou (IoU at t).
+        (Function remains the same, but uses the updated self.iou)
         """
-        # Store current IoU before potentially resetting reward
-        current_iou_value = self.iou # IoU calculated based on state at t+1
+        current_iou_value = self.iou
+        self.reward = 0.0
 
-        self.reward = 0.0 # Start fresh for reward r_{t+1}
-
-        # Penalty for not having an estimate
         if self.mapper.estimated_spill is None:
             self.reward -= self.world_config.uninitialized_mapper_penalty
         else:
-            # Reward for current IoU level (linear scaling)
             self.reward += self.world_config.base_iou_reward_scale * current_iou_value
-
-            # Reward for IoU improvement (IoU at t+1 vs IoU at t)
             iou_delta = current_iou_value - self.previous_iou
             self.reward += self.world_config.iou_improvement_scale * max(0, iou_delta)
-
-            # Apply step penalty (always applies unless uninitialized penalty was given)
             self.reward -= self.world_config.step_penalty
-
-        # Note: Success bonus is added externally in the step function based on the final reward value
+        # Success bonus added externally in step()
 
     def encode_state(self) -> Dict[str, Any]:
         """
-        Encodes the full state representation needed by the RL agent.
-        Includes the basic state tuple and the full trajectory history.
+        Encodes the full state representation using the ENHANCED basic state.
         """
+        # Get the enhanced basic state tuple for the *current* time step
         basic_state = self._get_basic_state_tuple()
+        # Get the history buffer (which contains features from t-N+1 to t)
         full_trajectory = np.array(self._trajectory_history, dtype=np.float32)
 
         if full_trajectory.shape != (self.trajectory_length, self.feature_dim):
-             # Attempt to recover if deque length is wrong (e.g., after load)
              print(f"Warning: Encoded trajectory shape mismatch. Got {full_trajectory.shape}, expected {(self.trajectory_length, self.feature_dim)}. Reinitializing history.")
-             self._initialize_trajectory_history() # This fills with initial state
-             # We might lose recent history here, but it prevents crashes.
-             # A better solution might involve padding/truncating if possible.
+             self._initialize_trajectory_history()
              full_trajectory = np.array(self._trajectory_history, dtype=np.float32)
              if full_trajectory.shape != (self.trajectory_length, self.feature_dim):
-                  raise ValueError(f"Failed to recover trajectory history shape. Expected {(self.trajectory_length, self.feature_dim)}")
+                  raise ValueError(f"Failed to recover trajectory history shape after mismatch. Expected {(self.trajectory_length, self.feature_dim)}")
+
+        # Check for NaNs in the final encoded state
+        if np.isnan(full_trajectory).any() or any(math.isnan(x) for x in basic_state):
+             print(f"Warning: NaN detected in final encoded state.")
+             # Apply nan_to_num for stability before returning
+             basic_state = tuple(0.0 if math.isnan(x) else x for x in basic_state)
+             full_trajectory = np.nan_to_num(full_trajectory, nan=0.0)
 
 
         return {
-            "basic_state": basic_state,
-            "full_trajectory": full_trajectory
+            "basic_state": basic_state,           # Enhanced state tuple (13 features)
+            "full_trajectory": full_trajectory    # History array (N, 15 features)
         }
