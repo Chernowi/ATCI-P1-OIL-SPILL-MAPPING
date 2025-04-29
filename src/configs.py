@@ -13,10 +13,10 @@ class SACConfig(BaseModel):
     """Configuration for the SAC agent"""
     state_dim: int = Field(CORE_STATE_DIM, description="Dimension of the basic state tuple (sensors + coords)")
     action_dim: int = Field(CORE_ACTION_DIM, description="Action dimension (yaw_change)")
-    hidden_dims: List[int] = Field([256, 256], description="List of hidden layer dimensions for MLP part")
+    hidden_dims: List[int] = Field([64, 64], description="List of hidden layer dimensions for MLP part")
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
     log_std_max: int = Field(2, description="Maximum log std for action distribution")
-    lr: float = Field(3e-4, description="Learning rate")
+    lr: float = Field(1e-5, description="Learning rate")
     gamma: float = Field(0.99, description="Discount factor")
     tau: float = Field(0.005, description="Target network update rate")
     alpha: float = Field(0.2, description="Temperature parameter (Initial value if auto-tuning)")
@@ -58,7 +58,7 @@ class PPOConfig(BaseModel):
 
 class ReplayBufferConfig(BaseModel):
     """Configuration for the replay buffer (SAC/TSAC)"""
-    capacity: int = Field(1000000, description="Maximum capacity of replay buffer (stores full trajectories)")
+    capacity: int = Field(100000, description="Maximum capacity of replay buffer (stores full trajectories)")
     gamma: float = Field(0.99, description="Discount factor for returns")
 
 class MapperConfig(BaseModel):
@@ -68,20 +68,20 @@ class MapperConfig(BaseModel):
 
 class TrainingConfig(BaseModel):
     """Configuration for training"""
-    num_episodes: int = Field(30, description="Number of episodes to train")
-    max_steps: int = Field(200, description="Maximum steps per episode")
+    num_episodes: int = Field(2000, description="Number of episodes to train")
+    max_steps: int = Field(300, description="Maximum steps per episode")
     batch_size: int = Field(32, description="Batch size for training (SAC/TSAC: trajectories, PPO: transitions)")
-    save_interval: int = Field(500, description="Interval (in episodes) for saving models")
+    save_interval: int = Field(200, description="Interval (in episodes) for saving models")
     log_frequency: int = Field(10, description="Frequency (in episodes) for logging to TensorBoard")
     # --- Keep single models_dir, set per specific config ---
     models_dir: str = Field("models/default_mapping/", description="Directory for saving models")
-    learning_starts: int = Field(1000, description="Number of steps to collect before starting SAC/TSAC training updates")
-    train_freq: int = Field(1, description="Update the policy every n environment steps (SAC/TSAC)")
-    gradient_steps: int = Field(1, description="How many gradient steps to perform when training frequency is met (SAC/TSAC)")
+    learning_starts: int = Field(8000, description="Number of steps to collect before starting SAC/TSAC training updates")
+    train_freq: int = Field(30, description="Update the policy every n environment steps (SAC/TSAC)")
+    gradient_steps: int = Field(20, description="How many gradient steps to perform when training frequency is met (SAC/TSAC)")
 
 class EvaluationConfig(BaseModel):
     """Configuration for evaluation"""
-    num_episodes: int = Field(0, description="Number of episodes for evaluation")
+    num_episodes: int = Field(5, description="Number of episodes for evaluation")
     max_steps: int = Field(300, description="Maximum steps per evaluation episode")
     render: bool = Field(True, description="Whether to render the evaluation")
 
@@ -122,10 +122,10 @@ class VisualizationConfig(BaseModel):
 class WorldConfig(BaseModel):
     """Configuration for the world"""
     dt: float = Field(1.0, description="Time step")
-    agent_speed: float = Field(1.0, description="Constant speed of the agent")
-    yaw_angle_range: Tuple[float, float] = Field((-math.pi / 6, math.pi / 6), description="Range of possible yaw angle changes per step [-max_change, max_change]")
+    agent_speed: float = Field(2.0, description="Constant speed of the agent")
+    yaw_angle_range: Tuple[float, float] = Field((-math.pi / 8, math.pi / 8), description="Range of possible yaw angle changes per step [-max_change, max_change]")
     num_sensors: int = Field(5, description="Number of sensors around the agent")
-    sensor_distance: float = Field(1.5, description="Distance of sensors from agent center")
+    sensor_distance: float = Field(3.5, description="Distance of sensors from agent center")
 
     agent_initial_location: Position = Field(default_factory=lambda: Position(x=-40, y=0), description="Initial agent position (used if randomization false)")
     randomize_agent_initial_location: bool = Field(True, description="Randomize agent initial location?")
