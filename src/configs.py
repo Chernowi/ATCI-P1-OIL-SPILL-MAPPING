@@ -68,9 +68,9 @@ class MapperConfig(BaseModel):
 
 class TrainingConfig(BaseModel):
     """Configuration for training"""
-    num_episodes: int = Field(2, description="Number of episodes to train")
+    num_episodes: int = Field(30, description="Number of episodes to train")
     max_steps: int = Field(200, description="Maximum steps per episode")
-    batch_size: int = Field(256, description="Batch size for training (SAC/TSAC: trajectories, PPO: transitions)")
+    batch_size: int = Field(32, description="Batch size for training (SAC/TSAC: trajectories, PPO: transitions)")
     save_interval: int = Field(500, description="Interval (in episodes) for saving models")
     log_frequency: int = Field(10, description="Frequency (in episodes) for logging to TensorBoard")
     # --- Keep single models_dir, set per specific config ---
@@ -81,8 +81,8 @@ class TrainingConfig(BaseModel):
 
 class EvaluationConfig(BaseModel):
     """Configuration for evaluation"""
-    num_episodes: int = Field(10, description="Number of episodes for evaluation")
-    max_steps: int = Field(500, description="Maximum steps per evaluation episode")
+    num_episodes: int = Field(0, description="Number of episodes for evaluation")
+    max_steps: int = Field(300, description="Maximum steps per evaluation episode")
     render: bool = Field(True, description="Whether to render the evaluation")
 
 class Position(BaseModel):
