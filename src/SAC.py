@@ -459,7 +459,7 @@ class SAC:
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         # Optional: Clip critic gradients
-        # nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
+        nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
         self.critic_optimizer.step()
 
         # --- Actor Update ---
@@ -478,7 +478,7 @@ class SAC:
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         # Optional: Clip actor gradients
-        # nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+        nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
         self.actor_optimizer.step()
 
         # Unfreeze critic parameters

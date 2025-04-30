@@ -13,7 +13,7 @@ class SACConfig(BaseModel):
     action_dim: int = Field(CORE_ACTION_DIM, description="Action dimension (yaw_change)")
     hidden_dims: List[int] = Field([256, 256], description="List of hidden layer dimensions for MLP part")
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
-    log_std_max: int = Field(2, description="Maximum log std for action distribution")
+    log_std_max: int = Field(1, description="Maximum log std for action distribution")
     lr: float = Field(1e-6, description="Learning rate")
     gamma: float = Field(0.99, description="Discount factor")
     tau: float = Field(0.001, description="Target network update rate")
@@ -56,7 +56,7 @@ class PPOConfig(BaseModel):
 
 class ReplayBufferConfig(BaseModel):
     """Configuration for the replay buffer (SAC/TSAC)"""
-    capacity: int = Field(100000, description="Maximum capacity of replay buffer (stores full trajectories)")
+    capacity: int = Field(1500000, description="Maximum capacity of replay buffer (stores full trajectories)")
     gamma: float = Field(0.99, description="Discount factor for returns")
 
 class MapperConfig(BaseModel):
@@ -68,7 +68,7 @@ class TrainingConfig(BaseModel):
     """Configuration for training"""
     num_episodes: int = Field(30000, description="Number of episodes to train")
     max_steps: int = Field(300, description="Maximum steps per episode")
-    batch_size: int = Field(128, description="Batch size for training (SAC/TSAC: trajectories, PPO: transitions)")
+    batch_size: int = Field(512, description="Batch size for training (SAC/TSAC: trajectories, PPO: transitions)")
     save_interval: int = Field(200, description="Interval (in episodes) for saving models")
     log_frequency: int = Field(10, description="Frequency (in episodes) for logging to TensorBoard")
     models_dir: str = Field("models/default_mapping/", description="Directory for saving models")
@@ -139,7 +139,7 @@ class WorldConfig(BaseModel):
     # --- Reward Function Parameters (INCENTIVIZE SPEED) ---
     base_iou_reward_scale: float = Field(0.5, description="Scaling factor for CURRENT IoU-based reward") # Increased slightly
     iou_improvement_scale: float = Field(1.0, description="Scaling factor for IoU *improvement* reward") # Increased slightly
-    step_penalty: float = Field(0.1, description="Penalty subtracted each step to encourage speed") # Increased significantly
+    step_penalty: float = Field(0.05, description="Penalty subtracted each step to encourage speed") # Increased significantly
     success_bonus: float = Field(5.0, description="Bonus reward for reaching success_iou_threshold") # Increased significantly
     uninitialized_mapper_penalty: float = Field(0.1, description="Penalty applied if the mapper hasn't produced a valid estimate yet") # Increased slightly
 
