@@ -1,6 +1,6 @@
 from world_objects import Object, Location, Velocity, OilSpillCircle
 # Use new state dim constant from configs
-from configs import WorldConfig, MapperConfig, ENHANCED_STATE_DIM, CORE_ACTION_DIM, TRAJECTORY_REWARD_DIM
+from configs import WorldConfig, MapperConfig, CORE_STATE_DIM, CORE_ACTION_DIM, TRAJECTORY_REWARD_DIM
 from mapper import Mapper
 from utils import calculate_iou_circles # Import IoU calculation
 import numpy as np
@@ -171,8 +171,8 @@ class World():
         )
 
         # Ensure the length matches the configured dimension
-        if len(state_list) != ENHANCED_STATE_DIM:
-             raise ValueError(f"Enhanced state dimension mismatch. Expected {ENHANCED_STATE_DIM}, got {len(state_list)}")
+        if len(state_list) != CORE_STATE_DIM:
+             raise ValueError(f"Enhanced state dimension mismatch. Expected {CORE_STATE_DIM}, got {len(state_list)}")
 
         # Check for NaNs before returning
         if any(math.isnan(x) for x in state_list):
@@ -267,12 +267,12 @@ class World():
         self.current_step += 1
         success = self.iou >= self.world_config.success_iou_threshold
         # Check if max steps reached OR success condition met this step
-        self.done = (self.current_step >= self.world_config.max_steps) or success or terminal_step
+        self.done = success or terminal_step
 
 
         # Apply success bonus if applicable (on top of reward calculated in _calculate_reward)
         # Only add bonus if success was the reason for termination *this* step
-        if success and training and self.done and not terminal_step and not (self.current_step >= self.world_config.max_steps):
+        if success and training and self.done and not terminal_step:
             self.reward += self.world_config.success_bonus
 
         # 7. Update trajectory history with [s_t, a_t, r_t]

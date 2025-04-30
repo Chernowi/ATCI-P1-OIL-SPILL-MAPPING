@@ -4,12 +4,12 @@ import math
 
 # Core dimensions for Oil Spill Mapping
 # CORE_STATE_DIM = 7  # Original: 5 sensor booleans (0/1) + agent_x + agent_y
-ENHANCED_STATE_DIM = 13 # New: 5 sensors + agent_x + agent_y + heading + map_exists + rel_cx + rel_cy + est_radius + dist_boundary
+CORE_STATE_DIM = 13 # New: 5 sensors + agent_x + agent_y + heading + map_exists + rel_cx + rel_cy + est_radius + dist_boundary
 CORE_ACTION_DIM = 1 # yaw_change_normalized
 TRAJECTORY_REWARD_DIM = 1 # Reward stored per step
 
 # --- State Feature Indices (for clarity) ---
-# Based on ENHANCED_STATE_DIM = 13
+# Based on CORE_STATE_DIM = 13
 SENSOR_INDICES = slice(0, 5)
 AGENT_X_INDEX = 5
 AGENT_Y_INDEX = 6
@@ -26,7 +26,7 @@ DIST_BOUNDARY_INDEX = 12
 
 class SACConfig(BaseModel):
     """Configuration for the SAC agent"""
-    state_dim: int = Field(ENHANCED_STATE_DIM, description="Dimension of the enhanced state tuple") # Use new dim
+    state_dim: int = Field(CORE_STATE_DIM, description="Dimension of the enhanced state tuple") # Use new dim
     action_dim: int = Field(CORE_ACTION_DIM, description="Action dimension (yaw_change)")
     hidden_dims: List[int] = Field([256, 256], description="List of hidden layer dimensions for MLP part")
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
@@ -43,7 +43,7 @@ class SACConfig(BaseModel):
 
 class TSACConfig(SACConfig):
     """Configuration for the Transformer-SAC agent, inheriting from SACConfig"""
-    state_dim: int = Field(ENHANCED_STATE_DIM, description="Dimension of the enhanced state tuple") # Use new dim
+    state_dim: int = Field(CORE_STATE_DIM, description="Dimension of the enhanced state tuple") # Use new dim
     use_rnn: bool = Field(False, description="Ensure RNN is disabled for T-SAC's Transformer Critic")
     embedding_dim: int = Field(128, description="Embedding dimension for states and actions in Transformer Critic")
     transformer_n_layers: int = Field(2, description="Number of Transformer encoder layers in Critic")
@@ -55,7 +55,7 @@ class TSACConfig(SACConfig):
 
 class PPOConfig(BaseModel):
     """Configuration for the PPO agent"""
-    state_dim: int = Field(ENHANCED_STATE_DIM, description="Dimension of the enhanced state tuple") # Use new dim
+    state_dim: int = Field(CORE_STATE_DIM, description="Dimension of the enhanced state tuple") # Use new dim
     action_dim: int = Field(CORE_ACTION_DIM, description="Action dimension (yaw_change)")
     hidden_dim: int = Field(256, description="Hidden layer dimension")
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
@@ -150,7 +150,7 @@ class WorldConfig(BaseModel):
 
     trajectory_length: int = Field(10, description="Number of steps (N) included in the trajectory state (SAC/TSAC)")
     # Updated trajectory feature dimension to match new state dim
-    trajectory_feature_dim: int = Field(ENHANCED_STATE_DIM + CORE_ACTION_DIM + TRAJECTORY_REWARD_DIM, description="Dimension of features per step in trajectory state (enhanced_state + prev_action + prev_reward)") # 13+1+1=15
+    trajectory_feature_dim: int = Field(CORE_STATE_DIM + CORE_ACTION_DIM + TRAJECTORY_REWARD_DIM, description="Dimension of features per step in trajectory state (enhanced_state + prev_action + prev_reward)") # 13+1+1=15
 
     # --- Termination Conditions ---
     success_iou_threshold: float = Field(0.90, description="IoU between estimated and true spill above which the episode is successful")
