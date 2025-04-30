@@ -16,6 +16,7 @@ class World():
     Action is yaw_change (normalized float).
     State is a tuple of sensor readings (booleans) and agent coordinates (x, y).
     Trajectory state (for SAC/TSAC) includes history of basic state, action, reward.
+    Goal: Encourage fast and accurate mapping.
     """
     def __init__(self, world_config: WorldConfig):
         self.world_config = world_config
@@ -41,7 +42,6 @@ class World():
         self.current_step: int = 0
 
         # Initialize trajectory history (deque stores feature vectors)
-        # Feature vector: [sensor1..5, agent_x, agent_y, prev_action, prev_reward]
         self._trajectory_history = deque(maxlen=self.trajectory_length)
 
         self.reset() # Initialize agent, spill, mapper, history
@@ -52,9 +52,9 @@ class World():
         self.done = False
         self.reward = 0.0
         self.iou = 0.0
-        self.previous_iou = 0.0 # Reset previous IoU
+        self.previous_iou = 0.0
 
-        # --- Initialize True Oil Spill ---
+        # Initialize True Oil Spill
         spill_cfg = self.world_config.oil_spill
         if spill_cfg.randomize_oil_spill:
             center_ranges = spill_cfg.center_randomization_range
@@ -68,7 +68,7 @@ class World():
             spill_radius = spill_cfg.initial_radius
         self.true_spill = OilSpillCircle(center=spill_center, radius=spill_radius)
 
-        # --- Initialize Agent ---
+        # Initialize Agent
         if self.world_config.randomize_agent_initial_location:
             ranges = self.world_config.agent_randomization_ranges
             agent_location = Location(
@@ -79,8 +79,8 @@ class World():
             loc_cfg = self.world_config.agent_initial_location
             agent_location = Location(x=loc_cfg.x, y=loc_cfg.y)
 
-        # --- STORE INITIAL LOCATION ---
-        self.agent_initial_location = Location(x=agent_location.x, y=agent_location.y) # Store a copy
+        # Store initial location
+        self.agent_initial_location = Location(x=agent_location.x, y=agent_location.y)
 
         initial_heading = random.uniform(-math.pi, math.pi)
         agent_velocity = Velocity(
@@ -89,10 +89,10 @@ class World():
         )
         self.agent = Object(location=agent_location, velocity=agent_velocity, name="agent")
 
-        # --- Reset Mapper ---
+        # Reset Mapper
         self.mapper.reset()
 
-        # --- Initialize Trajectory History ---
+        # Initialize Trajectory History
         self._initialize_trajectory_history()
 
         # Perform initial sensor reading and mapper update for the very first state
@@ -100,11 +100,11 @@ class World():
         for loc, read in zip(sensor_locs, sensor_reads):
              self.mapper.add_measurement(loc, read)
         self.mapper.estimate_spill()
-        self._calculate_iou() # Calculate initial IoU
-        self.previous_iou = self.iou # Set previous IoU for the first step calculation
+        self._calculate_iou()
+        self.previous_iou = self.iou
 
-        # Calculate reward for the initial state (though it won't be used directly by agent)
-        self._calculate_reward(sensor_reads) # Pass initial sensor readings
+        # Calculate reward for the initial state
+        self._calculate_reward(sensor_reads)
 
         return self.encode_state()
 
@@ -114,12 +114,9 @@ class World():
         sensor_locations = []
         agent_loc = self.agent.location
         agent_heading = self.agent.get_heading()
-        # Evenly space sensors around the agent
         angle_step = 2 * math.pi / self.num_sensors
         for i in range(self.num_sensors):
-            # Angle relative to agent's heading (0 degrees is straight ahead)
-            relative_angle = (i * angle_step) - (math.pi / 2) # Start with sensor 0 at agent's left
-            # Absolute angle in world frame
+            relative_angle = (i * angle_step) - (math.pi / 2)
             sensor_angle = agent_heading + relative_angle
             sensor_x = agent_loc.x + self.sensor_distance * math.cos(sensor_angle)
             sensor_y = agent_loc.y + self.sensor_distance * math.sin(sensor_angle)
@@ -180,21 +177,13 @@ class World():
     def step(self, yaw_change_normalized: float, training: bool = True, terminal_step: bool = False):
         """
         Advance the world state by one time step.
-        Args:
-            yaw_change_normalized (float): The normalized yaw change action [-1, 1].
-            training (bool): Flag indicating if rewards should be calculated.
-            terminal_step (bool): Flag indicating if this is the forced last step
-                                  due to max_steps being reached in the caller loop.
         """
         if self.done:
-            # print("Warning: step() called after environment is done.")
-            # Return current state without advancing time if already done
             return self.encode_state()
 
-        # --- Store info needed *before* state changes ---
+        # Store info needed *before* state changes
         prev_basic_state = self._get_basic_state_tuple()
         prev_action = yaw_change_normalized
-        # Grab the reward that was calculated at the END of the previous step (r_t)
         reward_from_previous_step = self.reward
 
         # 1. Get sensor readings BEFORE moving (at time t)
@@ -217,115 +206,108 @@ class World():
             self.mapper.add_measurement(loc, read)
         self.mapper.estimate_spill() # Estimate potentially updated based on readings at t
 
-        # --- State at t+1 is now determined (new agent pos, potentially new estimate) ---
+        # State at t+1 is now determined
 
         # 4. Calculate IoU based on NEW estimate (IoU at t+1)
-        self._calculate_iou() # Updates self.iou based on state at t+1
+        self._calculate_iou()
 
-        # 5. Calculate reward r_{t+1} based on the state at t+1 and the change from t
+        # 5. Calculate reward r_{t+1} based on state at t+1 and change from t
         if training:
-            # Pass the sensor readings taken at time t (which led to state t+1)
-            self._calculate_reward(sensor_reads_t)
+            self._calculate_reward(sensor_reads_t) # Pass sensor readings from time t
         else:
-            self.reward = 0.0 # Reset reward calculation for next step if not training
+            self.reward = 0.0
 
         # 6. Check termination conditions based on state at t+1
         self.current_step += 1
         success = self.iou >= self.world_config.success_iou_threshold
         self.done = success or terminal_step
 
-        # Apply success bonus if applicable (using reward calculated in _calculate_reward)
+        # Apply success bonus if applicable
         if success and training:
-             # Add bonus only if the success threshold was crossed in *this* step
              if not self.previous_iou >= self.world_config.success_iou_threshold:
                  self.reward += self.world_config.success_bonus
 
         # 7. Update trajectory history with [s_t, a_t, r_t]
-        # Use the reward that was calculated *at the end of the previous step*
         current_feature_vector = np.concatenate([
             np.array(prev_basic_state, dtype=np.float32),
             np.array([prev_action], dtype=np.float32),
-            np.array([reward_from_previous_step], dtype=np.float32) # Reward corresponding to s_t, a_t
+            np.array([reward_from_previous_step], dtype=np.float32)
         ])
         if len(current_feature_vector) != self.feature_dim:
              raise ValueError(f"Feature vector dim mismatch. Expected {self.feature_dim}, got {len(current_feature_vector)}")
         self._trajectory_history.append(current_feature_vector)
 
         # 8. Update previous_iou for the *next* step's calculation
-        # self.iou holds the value for time t+1, which becomes previous_iou for next step
         self.previous_iou = self.iou
 
         return self.encode_state() # Return the state dict representing s_{t+1}
 
-    # --- MODIFIED REWARD CALCULATION ---
     def _calculate_reward(self, current_sensor_readings: List[bool]):
         """
-        Calculate reward r_{t+1} based on state at t+1 and change from t.
-        Uses self.iou (current IoU at t+1), self.previous_iou (IoU at t),
-        and the sensor readings taken at time t.
+        Calculate reward r_{t+1} to encourage fast and accurate mapping.
         """
-        # Store current IoU before potentially resetting reward
-        current_iou_value = self.iou # IoU calculated based on state at t+1
+        cfg = self.world_config
+        current_iou_value = self.iou
 
         self.reward = 0.0 # Start fresh for reward r_{t+1}
 
-        # --- Standard Components ---
-        # Penalty for not having an estimate
+        # --- Penalties ---
+        # Constant penalty per step to encourage speed
+        self.reward -= cfg.step_penalty
+
+        # Penalty for wandering too far (linear or logarithmic)
+        if cfg.distance_penalty_scale > 0 and self.agent_initial_location:
+            distance_from_start = self.agent.location.distance_to(self.agent_initial_location)
+            penalty = 0.0
+            if cfg.distance_penalty_type == 'linear':
+                penalty = cfg.distance_penalty_scale * distance_from_start
+            elif cfg.distance_penalty_type == 'log':
+                # Add 1 to avoid log(0) and ensure penalty is 0 at distance 0
+                penalty = cfg.distance_penalty_scale * math.log(1 + distance_from_start)
+            elif cfg.distance_penalty_type == 'quadratic':
+                 penalty = cfg.distance_penalty_scale * (distance_from_start ** 2)
+            # Add other types if needed
+            self.reward -= penalty
+
+        # Penalty if mapper isn't initialized yet
         if self.mapper.estimated_spill is None:
-            self.reward -= self.world_config.uninitialized_mapper_penalty
+            self.reward -= cfg.uninitialized_mapper_penalty
         else:
-            # Reward for current IoU level (linear scaling)
-            self.reward += self.world_config.base_iou_reward_scale * current_iou_value
-
-            # Reward for IoU improvement (IoU at t+1 vs IoU at t)
-            iou_delta = current_iou_value - self.previous_iou
-            self.reward += self.world_config.iou_improvement_scale * max(0, iou_delta)
-
-            # Apply step penalty (always applies unless uninitialized penalty was given)
-            self.reward -= self.world_config.step_penalty
-
-            # --- NEW: Reward for proximity to estimated spill boundary ---
+            # --- Positive Rewards (only if estimate exists) ---
             est_spill = self.mapper.estimated_spill
+
+            # Reward for current IoU level
+            self.reward += cfg.base_iou_reward_scale * current_iou_value
+
+            # Reward for IoU improvement
+            iou_delta = current_iou_value - self.previous_iou
+            self.reward += cfg.iou_improvement_scale * max(0, iou_delta)
+
+            # Reward for proximity to estimated spill boundary
             distance_to_est_center = self.agent.location.distance_to(est_spill.center)
-            # Ideal distance is the estimated radius
             distance_error_from_boundary = abs(distance_to_est_center - est_spill.radius)
-            # Reward decreases as the agent deviates from the boundary
-            # Adding a small epsilon to avoid division by zero if error is exactly 0
-            proximity_reward = self.world_config.proximity_to_spill_scale / (1.0 + distance_error_from_boundary + 1e-6)
+            proximity_reward = cfg.proximity_to_spill_scale / (1.0 + distance_error_from_boundary + 1e-6)
             self.reward += proximity_reward
 
-            # --- NEW: Bonus for detecting oil *when an estimate exists* ---
-            # Encourages finding new points inside/near the estimate
+            # Bonus for detecting oil *when an estimate exists*
             if any(current_sensor_readings):
-                self.reward += self.world_config.new_oil_detection_bonus
+                self.reward += cfg.new_oil_detection_bonus
 
-        # --- NEW: Penalty for distance from start ---
-        if self.agent_initial_location and self.world_config.distance_from_start_penalty_scale > 0:
-            distance_from_start = self.agent.location.distance_to(self.agent_initial_location)
-            # Quadratic penalty increases more sharply with distance
-            distance_penalty = self.world_config.distance_from_start_penalty_scale * (distance_from_start ** 2)
-            self.reward -= distance_penalty
-
-
-        # Note: Success bonus is added externally in the step function based on the final reward value
+        # Note: Success bonus is added externally in the step function
 
     def encode_state(self) -> Dict[str, Any]:
         """
         Encodes the full state representation needed by the RL agent.
-        Includes the basic state tuple and the full trajectory history.
         """
         basic_state = self._get_basic_state_tuple()
         full_trajectory = np.array(self._trajectory_history, dtype=np.float32)
 
         if full_trajectory.shape != (self.trajectory_length, self.feature_dim):
-             # Attempt to recover if deque length is wrong (e.g., after load)
              print(f"Warning: Encoded trajectory shape mismatch. Got {full_trajectory.shape}, expected {(self.trajectory_length, self.feature_dim)}. Reinitializing history.")
-             self._initialize_trajectory_history() # This fills with initial state
-             # We might lose recent history here, but it prevents crashes.
+             self._initialize_trajectory_history()
              full_trajectory = np.array(self._trajectory_history, dtype=np.float32)
              if full_trajectory.shape != (self.trajectory_length, self.feature_dim):
                   raise ValueError(f"Failed to recover trajectory history shape. Expected {(self.trajectory_length, self.feature_dim)}")
-
 
         return {
             "basic_state": basic_state,
