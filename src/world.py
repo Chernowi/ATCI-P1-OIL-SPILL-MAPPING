@@ -31,6 +31,7 @@ class World():
         self.agent: Object = None
         self.true_spill: OilSpillCircle = None
         self.mapper: Mapper = Mapper(self.mapper_config)
+        self.agent_initial_location: Location = None # Store initial agent location
 
         # World state variables
         self.reward: float = 0.0
@@ -78,6 +79,9 @@ class World():
             loc_cfg = self.world_config.agent_initial_location
             agent_location = Location(x=loc_cfg.x, y=loc_cfg.y)
 
+        # --- STORE INITIAL LOCATION ---
+        self.agent_initial_location = Location(x=agent_location.x, y=agent_location.y) # Store a copy
+
         initial_heading = random.uniform(-math.pi, math.pi)
         agent_velocity = Velocity(
             x=self.agent_speed * math.cos(initial_heading),
@@ -98,6 +102,9 @@ class World():
         self.mapper.estimate_spill()
         self._calculate_iou() # Calculate initial IoU
         self.previous_iou = self.iou # Set previous IoU for the first step calculation
+
+        # Calculate reward for the initial state (though it won't be used directly by agent)
+        self._calculate_reward(sensor_reads) # Pass initial sensor readings
 
         return self.encode_state()
 
@@ -180,7 +187,7 @@ class World():
                                   due to max_steps being reached in the caller loop.
         """
         if self.done:
-            print("Warning: step() called after environment is done.")
+            # print("Warning: step() called after environment is done.")
             # Return current state without advancing time if already done
             return self.encode_state()
 
@@ -191,7 +198,7 @@ class World():
         reward_from_previous_step = self.reward
 
         # 1. Get sensor readings BEFORE moving (at time t)
-        sensor_locs, sensor_reads = self._get_sensor_readings()
+        sensor_locs, sensor_reads_t = self._get_sensor_readings() # Sensor readings at time t
 
         # 2. Apply action (a_t): Update agent velocity and position
         yaw_change = yaw_change_normalized * self.max_yaw_change
@@ -206,7 +213,7 @@ class World():
         # Agent is now at position for time t+1
 
         # 3. Update Mapper with measurements taken BEFORE moving (at time t)
-        for loc, read in zip(sensor_locs, sensor_reads):
+        for loc, read in zip(sensor_locs, sensor_reads_t):
             self.mapper.add_measurement(loc, read)
         self.mapper.estimate_spill() # Estimate potentially updated based on readings at t
 
@@ -217,7 +224,8 @@ class World():
 
         # 5. Calculate reward r_{t+1} based on the state at t+1 and the change from t
         if training:
-            self._calculate_reward() # Uses self.iou (current) and self.previous_iou
+            # Pass the sensor readings taken at time t (which led to state t+1)
+            self._calculate_reward(sensor_reads_t)
         else:
             self.reward = 0.0 # Reset reward calculation for next step if not training
 
@@ -228,8 +236,9 @@ class World():
 
         # Apply success bonus if applicable (using reward calculated in _calculate_reward)
         if success and training:
-             if self.done and not terminal_step: # Check if success caused termination this step
-                 self.reward += self.world_config.success_bonus # Add bonus on top
+             # Add bonus only if the success threshold was crossed in *this* step
+             if not self.previous_iou >= self.world_config.success_iou_threshold:
+                 self.reward += self.world_config.success_bonus
 
         # 7. Update trajectory history with [s_t, a_t, r_t]
         # Use the reward that was calculated *at the end of the previous step*
@@ -248,16 +257,19 @@ class World():
 
         return self.encode_state() # Return the state dict representing s_{t+1}
 
-    def _calculate_reward(self):
+    # --- MODIFIED REWARD CALCULATION ---
+    def _calculate_reward(self, current_sensor_readings: List[bool]):
         """
         Calculate reward r_{t+1} based on state at t+1 and change from t.
-        Uses self.iou (current IoU at t+1) and self.previous_iou (IoU at t).
+        Uses self.iou (current IoU at t+1), self.previous_iou (IoU at t),
+        and the sensor readings taken at time t.
         """
         # Store current IoU before potentially resetting reward
         current_iou_value = self.iou # IoU calculated based on state at t+1
 
         self.reward = 0.0 # Start fresh for reward r_{t+1}
 
+        # --- Standard Components ---
         # Penalty for not having an estimate
         if self.mapper.estimated_spill is None:
             self.reward -= self.world_config.uninitialized_mapper_penalty
@@ -271,6 +283,29 @@ class World():
 
             # Apply step penalty (always applies unless uninitialized penalty was given)
             self.reward -= self.world_config.step_penalty
+
+            # --- NEW: Reward for proximity to estimated spill boundary ---
+            est_spill = self.mapper.estimated_spill
+            distance_to_est_center = self.agent.location.distance_to(est_spill.center)
+            # Ideal distance is the estimated radius
+            distance_error_from_boundary = abs(distance_to_est_center - est_spill.radius)
+            # Reward decreases as the agent deviates from the boundary
+            # Adding a small epsilon to avoid division by zero if error is exactly 0
+            proximity_reward = self.world_config.proximity_to_spill_scale / (1.0 + distance_error_from_boundary + 1e-6)
+            self.reward += proximity_reward
+
+            # --- NEW: Bonus for detecting oil *when an estimate exists* ---
+            # Encourages finding new points inside/near the estimate
+            if any(current_sensor_readings):
+                self.reward += self.world_config.new_oil_detection_bonus
+
+        # --- NEW: Penalty for distance from start ---
+        if self.agent_initial_location and self.world_config.distance_from_start_penalty_scale > 0:
+            distance_from_start = self.agent.location.distance_to(self.agent_initial_location)
+            # Quadratic penalty increases more sharply with distance
+            distance_penalty = self.world_config.distance_from_start_penalty_scale * (distance_from_start ** 2)
+            self.reward -= distance_penalty
+
 
         # Note: Success bonus is added externally in the step function based on the final reward value
 
@@ -287,7 +322,6 @@ class World():
              print(f"Warning: Encoded trajectory shape mismatch. Got {full_trajectory.shape}, expected {(self.trajectory_length, self.feature_dim)}. Reinitializing history.")
              self._initialize_trajectory_history() # This fills with initial state
              # We might lose recent history here, but it prevents crashes.
-             # A better solution might involve padding/truncating if possible.
              full_trajectory = np.array(self._trajectory_history, dtype=np.float32)
              if full_trajectory.shape != (self.trajectory_length, self.feature_dim):
                   raise ValueError(f"Failed to recover trajectory history shape. Expected {(self.trajectory_length, self.feature_dim)}")
