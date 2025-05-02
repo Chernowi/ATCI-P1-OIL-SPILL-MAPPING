@@ -13,12 +13,13 @@ from configs import VisualizationConfig
 from typing import List
 
 # Global trajectory storage - reset using reset_trajectories()
-_agent_trajectory: List[tuple[float, float]] = []
+_agent_trajectory: List[tuple[float, float]] = [] # Stores UNNORMALIZED coordinates
 
 
 def visualize_world(world: World, vis_config: VisualizationConfig, filename: str = None, show_trajectories: bool = True):
     """
-    Visualize the oil spill mapping world state and save it to a file.
+    Visualize the oil spill mapping world state (point clouds, hull) and save it to a file.
+    Operates on UNNORMALIZED coordinates for plotting.
 
     Args:
         world (World): The World object to visualize.
@@ -32,8 +33,9 @@ def visualize_world(world: World, vis_config: VisualizationConfig, filename: str
     global _agent_trajectory
     max_trajectory_points = vis_config.max_trajectory_points
 
-    # --- Update Trajectory ---
+    # --- Update Trajectory (using unnormalized coordinates) ---
     if world.agent and world.agent.location:
+        # Store UNNORMALIZED location
         _agent_trajectory.append((world.agent.location.x, world.agent.location.y))
         if len(_agent_trajectory) > max_trajectory_points:
             _agent_trajectory = _agent_trajectory[-max_trajectory_points:]
@@ -46,96 +48,77 @@ def visualize_world(world: World, vis_config: VisualizationConfig, filename: str
 
     fig, ax = plt.subplots(figsize=vis_config.figure_size)
 
-    # --- Plot Trajectory ---
+    # --- Plot Trajectory (Unnormalized) ---
     if show_trajectories and len(_agent_trajectory) > 1:
         agent_traj_x, agent_traj_y = zip(*_agent_trajectory)
-        ax.plot(agent_traj_x, agent_traj_y, 'b-',
-                linewidth=1.0, alpha=0.5, label='Agent Traj.')
+        ax.plot(agent_traj_x, agent_traj_y, 'g-', # Changed color to green
+                linewidth=1.0, alpha=0.6, label='Agent Traj.')
 
-    # --- Plot True Oil Spill ---
-    if world.true_spill:
-        true_spill_patch = Circle((world.true_spill.center.x, world.true_spill.center.y),
-                                  world.true_spill.radius,
-                                  color='gray', alpha=0.4, label=f'True Spill (R={world.true_spill.radius:.1f})')
-        ax.add_patch(true_spill_patch)
+    # --- Plot True Oil Points ---
+    if vis_config.plot_oil_points and world.true_oil_points:
+        oil_x, oil_y = zip(*[(p.x, p.y) for p in world.true_oil_points])
+        ax.scatter(oil_x, oil_y, color='black', marker='.', s=vis_config.point_marker_size, alpha=0.7, label='True Oil')
 
-    # --- Plot Estimated Oil Spill ---
-    if world.mapper and world.mapper.estimated_spill:
-        est_spill = world.mapper.estimated_spill
-        est_spill_patch = Circle((est_spill.center.x, est_spill.center.y),
-                                 est_spill.radius,
-                                 edgecolor='red', facecolor='none', linewidth=1.5, linestyle='--',
-                                 label=f'Est. Spill (R={est_spill.radius:.1f}, IoU={world.iou:.3f})')
-        ax.add_patch(est_spill_patch)
-        # Plot center of estimated spill
-        ax.scatter(est_spill.center.x, est_spill.center.y, color='red', marker='x', s=50, label='Est. Center')
+    # --- Plot True Water Points ---
+    if vis_config.plot_water_points and world.true_water_points:
+        water_x, water_y = zip(*[(p.x, p.y) for p in world.true_water_points])
+        ax.scatter(water_x, water_y, color='lightblue', marker='.', s=vis_config.point_marker_size, alpha=0.5, label='Water')
+
+    # --- Plot Estimated Oil Spill Hull ---
+    if world.mapper and world.mapper.hull_vertices is not None:
+        # hull_vertices is already ordered for polygon plotting
+        hull_poly = Polygon(world.mapper.hull_vertices,
+                            edgecolor='red', facecolor='red', alpha=0.2, # Filled transparent red
+                            linewidth=1.5, linestyle='--',
+                            label=f'Est. Hull (Pts In: {world.performance_metric:.2%})')
+        ax.add_patch(hull_poly)
+        # Optional: plot oil sensor locations used for hull
+        # if world.mapper.oil_sensor_locations:
+        #     sensor_x, sensor_y = zip(*[(p.x, p.y) for p in world.mapper.oil_sensor_locations])
+        #     ax.scatter(sensor_x, sensor_y, color='darkred', marker='x', s=20, label='Oil Sensors Used')
 
 
-    # --- Plot Agent ---
+    # --- Plot Agent (Unnormalized) ---
     if world.agent and world.agent.location:
         ax.scatter(world.agent.location.x, world.agent.location.y,
-                   color='blue', marker='o', s=80, label='Agent')
+                   color='blue', marker='o', s=60, zorder=5, label='Agent') # Increased size slightly
         # Add heading indicator
         heading = world.agent.get_heading()
+        arrow_len = 3.0 # Length in world units
         ax.arrow(world.agent.location.x, world.agent.location.y,
-                 2.0 * math.cos(heading), 2.0 * math.sin(heading), # Arrow length 2.0 units
-                 head_width=0.8, head_length=1.0, fc='blue', ec='blue', alpha=0.7)
+                 arrow_len * math.cos(heading), arrow_len * math.sin(heading),
+                 head_width=1.0, head_length=1.5, fc='blue', ec='blue', alpha=0.7, zorder=5)
 
-    # --- Plot Sensors ---
-    if world.agent and world.true_spill:
-        sensor_locs, sensor_reads = world._get_sensor_readings() # Get current readings
+    # --- Plot Sensors and Radii (Unnormalized) ---
+    if world.agent:
+        sensor_locs, sensor_reads = world._get_sensor_readings() # Get current readings (unnormalized locations)
         for i, loc in enumerate(sensor_locs):
             is_oil = sensor_reads[i]
             color = vis_config.sensor_color_oil if is_oil else vis_config.sensor_color_water
-            edge_color = 'black' if is_oil else 'blue'
+            # Plot sensor location
             ax.scatter(loc.x, loc.y,
                        color=color, marker='s', s=vis_config.sensor_marker_size,
-                       edgecolors=edge_color, linewidth=0.5, label='Sensors' if i == 0 else "")
+                       edgecolors='black', linewidth=0.5, zorder=4, label='Sensors' if i == 0 else "")
+            # Plot sensor radius
+            sensor_circle = Circle((loc.x, loc.y), world.sensor_radius,
+                                   edgecolor=color, facecolor='none',
+                                   linewidth=0.5, linestyle=':', alpha=0.4, zorder=3)
+            ax.add_patch(sensor_circle)
 
-    # --- Plot Mapper Points (Optional - can be slow if many points) ---
-    # Uncomment if needed for debugging, but might clutter the plot
-    # if world.mapper:
-    #     if world.mapper.oil_points:
-    #         oil_x, oil_y = zip(*[(p.x, p.y) for p in world.mapper.oil_points])
-    #         ax.scatter(oil_x, oil_y, color='black', marker='.', s=5, alpha=0.6, label='Oil Hits')
-    #     if world.mapper.water_points:
-    #         water_x, water_y = zip(*[(p.x, p.y) for p in world.mapper.water_points])
-    #         ax.scatter(water_x, water_y, color='cyan', marker='.', s=5, alpha=0.6, label='Water Hits')
 
     # --- Axis Setup ---
-    ax.set_xlabel('X Coordinate')
-    ax.set_ylabel('Y Coordinate')
-    title_info = f"Step: {world.current_step}, Reward: {world.reward:.3f}, IoU: {world.iou:.3f}"
-    ax.set_title(f'Oil Spill Mapping\n{title_info}')
+    world_w, world_h = world.world_size
+    ax.set_xlabel('X Coordinate (Unnormalized)')
+    ax.set_ylabel('Y Coordinate (Unnormalized)')
+    title_info1 = f"Step: {world.current_step}, Reward: {world.reward:.3f}"
+    title_info2 = f"Metric (Pts In): {world.performance_metric:.3f}"
+    if world.current_seed is not None: title_info1 += f", Seed: {world.current_seed}"
+    ax.set_title(f'Oil Spill Mapping (PointCloud)\n{title_info1} | {title_info2}')
 
-    # Determine plot bounds dynamically
-    points_x = [world.agent.location.x] if world.agent else []
-    points_y = [world.agent.location.y] if world.agent else []
-    if world.true_spill:
-        points_x.extend([world.true_spill.center.x - world.true_spill.radius, world.true_spill.center.x + world.true_spill.radius])
-        points_y.extend([world.true_spill.center.y - world.true_spill.radius, world.true_spill.center.y + world.true_spill.radius])
-    if world.mapper and world.mapper.estimated_spill:
-        est = world.mapper.estimated_spill
-        points_x.extend([est.center.x - est.radius, est.center.x + est.radius])
-        points_y.extend([est.center.y - est.radius, est.center.y + est.radius])
-    if show_trajectories and _agent_trajectory:
-        traj_x, traj_y = zip(*_agent_trajectory)
-        points_x.extend(traj_x)
-        points_y.extend(traj_y)
-
-    if not points_x or not points_y:
-        min_x, max_x, min_y, max_y = -50, 50, -50, 50 # Default bounds
-    else:
-        min_x, max_x = min(points_x), max(points_x)
-        min_y, max_y = min(points_y), max(points_y)
-
-    # Add padding
-    range_x = max(max_x - min_x, 10.0) # Ensure minimum range
-    range_y = max(max_y - min_y, 10.0)
-    padding_x = range_x * 0.15
-    padding_y = range_y * 0.15
-    ax.set_xlim(min_x - padding_x, max_x + padding_x)
-    ax.set_ylim(min_y - padding_y, max_y + padding_y)
+    # Use fixed world boundaries plus padding
+    padding = 5.0 # Padding in world units
+    ax.set_xlim(-padding, world_w + padding)
+    ax.set_ylim(-padding, world_h + padding)
 
     ax.set_aspect('equal', adjustable='box')
     # Place legend outside plot area
@@ -149,7 +132,7 @@ def visualize_world(world: World, vis_config: VisualizationConfig, filename: str
 
     full_path = os.path.join(save_dir, filename)
     try:
-        plt.savefig(full_path)
+        plt.savefig(full_path, bbox_inches='tight') # Use bbox_inches='tight'
         plt.close(fig)
         return full_path
     except Exception as e:
@@ -166,7 +149,7 @@ def reset_trajectories():
 
 def save_gif(output_filename: str, vis_config: VisualizationConfig, frame_paths: list, delete_frames: bool = True):
     """
-    Create a GIF from a list of frame image paths. (Unchanged from original)
+    Create a GIF from a list of frame image paths.
     """
     if not frame_paths:
         print("No frame paths provided to create GIF."); return None
@@ -178,21 +161,24 @@ def save_gif(output_filename: str, vis_config: VisualizationConfig, frame_paths:
     print(f"Creating GIF from {len(frame_paths)} frames: {output_path}")
     try:
         images = []
+        valid_frame_paths = []
         for frame_path in frame_paths:
-            if os.path.exists(frame_path): images.append(imageio.imread(frame_path))
-            else: print(f"Warning: Frame file not found: {frame_path}")
-        if not images: print("Error: No valid frames found."); return None
+            if os.path.exists(frame_path):
+                 images.append(imageio.imread(frame_path))
+                 valid_frame_paths.append(frame_path) # Only keep track of files actually read
+            else: print(f"Warning: Frame file not found during GIF creation: {frame_path}")
+        if not images: print("Error: No valid frames found for GIF."); return None
 
-        imageio.mimsave(output_path, images, duration=duration)
+        imageio.mimsave(output_path, images, duration=duration) # Use keyword 'duration'
         print(f"GIF saved successfully.")
 
         if delete_frames:
             deleted_count = 0
-            for frame_path in frame_paths:
+            # Iterate over the frames actually used in the GIF
+            for frame_path in valid_frame_paths:
                 try:
                     if os.path.exists(frame_path): os.remove(frame_path); deleted_count += 1
                 except OSError as e: print(f"Warn: Could not delete frame {frame_path}: {e}")
             if deleted_count > 0: print(f"Deleted {deleted_count} frame files.")
         return output_path
     except Exception as e: print(f"Error creating GIF {output_path}: {e}"); return None
-

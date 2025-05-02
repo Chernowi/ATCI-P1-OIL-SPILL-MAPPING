@@ -13,6 +13,8 @@ class Velocity():
 
     def get_heading(self) -> float:
         """Calculate the heading angle in radians."""
+        if not self.is_moving():
+            return 0.0 # Default heading if not moving
         return math.atan2(self.y, self.x)
 
     def __str__(self) -> str:
@@ -20,7 +22,7 @@ class Velocity():
         return f"Vel:(vx:{self.x:.2f}, vy:{self.y:.2f})"
 
 class Location():
-    """Represents the location of an object in 2D space."""
+    """Represents the location of an object in 2D space (unnormalized)."""
     def __init__(self, x: float, y: float):
         self.x = x
         self.y = y
@@ -34,15 +36,21 @@ class Location():
         """Calculate Euclidean distance to another location."""
         return math.sqrt((self.x - other_loc.x)**2 + (self.y - other_loc.y)**2)
 
+    def get_normalized(self, world_size: Tuple[float, float]) -> Tuple[float, float]:
+        """Return normalized coordinates [0, 1] based on world size."""
+        norm_x = max(0.0, min(1.0, self.x / world_size[0]))
+        norm_y = max(0.0, min(1.0, self.y / world_size[1]))
+        return norm_x, norm_y
+
     def __str__(self) -> str:
         """String representation of location."""
         return f"Pos:(x:{self.x:.2f}, y:{self.y:.2f})"
 
 class Object():
-    """Represents a generic object with location and velocity in 2D."""
+    """Represents a generic object with location and velocity in 2D (unnormalized coords)."""
     def __init__(self, location: Location, velocity: Velocity = None, name: str = None):
         self.name = name if name else "Unnamed Object"
-        self.location = location
+        self.location = location # Unnormalized
         self.velocity = velocity if velocity is not None else Velocity(0.0, 0.0)
 
     def update_position(self, dt: float = 1.0):
@@ -58,18 +66,3 @@ class Object():
         """String representation of the object."""
         name_str = f"{self.name}: "
         return f"{name_str}{self.location}, {self.velocity}"
-
-# Represent the spill as a simple circle for now
-class OilSpillCircle:
-    """Represents the true oil spill as a circle."""
-    def __init__(self, center: Location, radius: float):
-        self.center = center
-        self.radius = radius
-
-    def is_inside(self, point: Location) -> bool:
-        """Check if a given Location is inside the spill."""
-        return self.center.distance_to(point) <= self.radius
-
-    def __str__(self) -> str:
-        return f"OilSpill(Center={self.center}, Radius={self.radius:.2f})"
-

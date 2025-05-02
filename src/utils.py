@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import math
+from typing import Tuple # Added
 
 class RunningMeanStd:
     # Based on https://github.com/openai/baselines/blob/master/baselines/common/running_mean_std.py
@@ -27,9 +28,14 @@ class RunningMeanStd:
 
         # Ensure input tensor is on the same device
         x = x.to(self.device)
+        if x.dim() == 1: # Handle single instance update
+             x = x.unsqueeze(0)
+        if x.shape[0] == 0: return # Handle empty batch
 
         batch_mean = torch.mean(x, dim=0)
-        batch_var = torch.var(x, dim=0, unbiased=False) # Use population variance for updates
+        # Use population variance (unbiased=False) for stability in updates
+        # Using unbiased=True can lead to issues if batch size is 1
+        batch_var = torch.var(x, dim=0, unbiased=False)
         batch_count = torch.tensor(x.shape[0], dtype=torch.float32, device=self.device)
 
         delta = batch_mean - self.mean # Already on self.device
@@ -42,6 +48,9 @@ class RunningMeanStd:
         M2 = m_a + m_b + torch.square(delta) * self.count * batch_count / tot_count
         new_var = M2 / tot_count
 
+        # Ensure variance doesn't become negative due to floating point errors
+        new_var = torch.clamp(new_var, min=0.0)
+
         # Update state (already on self.device)
         self.mean = new_mean
         self.var = new_var
@@ -51,9 +60,10 @@ class RunningMeanStd:
         """ Normalizes the data """
         # Ensure input tensor is on the same device
         x = x.to(self.device)
-        # Note: Does not update mean/std
-        result = (x - self.mean) / torch.sqrt(self.var + self.epsilon)
-        return torch.clamp(result, -10.0, 10.0) # Clamp to avoid extreme values
+        # Use variance clamped slightly above zero for numerical stability
+        normalized_x = (x - self.mean) / torch.sqrt(self.var + self.epsilon)
+        # Clamp result to prevent extreme values which can destabilize training
+        return torch.clamp(normalized_x, -10.0, 10.0)
 
     def state_dict(self):
         # Ensure tensors are moved to CPU for saving, common practice
@@ -70,78 +80,3 @@ class RunningMeanStd:
 
     def train(self):
          self._is_eval = False
-
-
-def calculate_iou_circles(center1, radius1, center2, radius2) -> float:
-    """Calculates the Intersection over Union (IoU) for two circles."""
-    # Ensure Location objects are handled correctly
-    x1 = center1.x
-    y1 = center1.y
-    x2 = center2.x
-    y2 = center2.y
-    r1 = float(radius1)
-    r2 = float(radius2)
-
-    # Ensure radii are non-negative
-    r1 = max(0.0, r1)
-    r2 = max(0.0, r2)
-
-    d_sq = (x1 - x2)**2 + (y1 - y2)**2
-    d = math.sqrt(d_sq)
-
-    # Handle edge cases: identical circles, zero radius, containment, no overlap
-    if d_sq < 1e-9 and abs(r1 - r2) < 1e-9:
-        return 1.0 if r1 > 1e-9 else 0.0 # Identical circles (IoU 1) or two zero-radius points (IoU 0 unless r1=r2=0)
-    if r1 == 0.0 and r2 == 0.0:
-        return 0.0 # Two distinct zero-radius points
-
-    if d >= r1 + r2 - 1e-9 : # Use tolerance for floating point
-        return 0.0  # No overlap
-
-    if d <= abs(r1 - r2) + 1e-9:
-        # One circle contains the other
-        min_r = min(r1, r2)
-        max_r = max(r1, r2)
-        if max_r == 0: return 1.0 # Should have been caught by identical check, but for safety
-        area_min = math.pi * min_r**2
-        area_max = math.pi * max_r**2
-        return area_min / area_max if area_max > 0 else 1.0 # IoU is ratio of areas
-
-    # Calculate intersection area for overlapping circles
-    try:
-        # Clamp arguments for acos to avoid domain errors due to floating point inaccuracies
-        arg1 = max(-1.0, min(1.0, (d_sq + r1**2 - r2**2) / (2 * d * r1)))
-        arg2 = max(-1.0, min(1.0, (d_sq + r2**2 - r1**2) / (2 * d * r2)))
-
-        alpha = math.acos(arg1)
-        beta = math.acos(arg2)
-    except ValueError:
-        # Should ideally not happen with clamping and prior checks, but as fallback:
-        print(f"Warning: acos domain error persists in IoU. d={d}, r1={r1}, r2={r2}")
-        # Re-check conditions with tolerance
-        if d >= r1 + r2 - 1e-7: return 0.0
-        if d <= abs(r1 - r2) + 1e-7:
-             min_r, max_r = min(r1, r2), max(r1, r2)
-             area_min = math.pi * min_r**2
-             area_max = math.pi * max_r**2
-             return area_min / area_max if area_max > 0 else 1.0
-        return 0.0 # Fallback if still failing
-
-    intersection_area = (r1**2 * alpha - 0.5 * r1**2 * math.sin(2 * alpha) +
-                         r2**2 * beta - 0.5 * r2**2 * math.sin(2 * beta))
-
-    # Ensure intersection area is non-negative
-    intersection_area = max(0.0, intersection_area)
-
-    # Calculate union area
-    area1 = math.pi * r1**2
-    area2 = math.pi * r2**2
-    union_area = area1 + area2 - intersection_area
-
-    if union_area <= 1e-9: # Avoid division by zero
-        # If union is zero, means both areas are zero. If intersection>0 (shouldn't happen), IoU is 1? Assume 0.
-        return 1.0 if intersection_area > 1e-9 and abs(area1)<1e-9 and abs(area2)<1e-9 else 0.0
-
-
-    iou = intersection_area / union_area
-    return max(0.0, min(1.0, iou)) # Clamp final result

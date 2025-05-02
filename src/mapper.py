@@ -1,111 +1,116 @@
 import numpy as np
 import math
-from typing import List, Tuple, Optional
-from world_objects import Location, OilSpillCircle
+from typing import List, Tuple, Optional, Any
+from world_objects import Location
 from configs import MapperConfig
-from scipy.spatial import ConvexHull
-from scipy.optimize import minimize
+from scipy.spatial import ConvexHull, Delaunay # Import Delaunay for point-in-hull check
 import warnings
 
 class Mapper:
-    """Estimates the oil spill shape based on sensor measurements."""
+    """
+    Estimates the oil spill shape using Convex Hull based on sensor locations
+    that detected oil.
+    """
     def __init__(self, config: MapperConfig):
         self.config = config
-        self.oil_points: List[Location] = []
-        self.water_points: List[Location] = []
-        self.estimated_spill: Optional[OilSpillCircle] = None
+        self.oil_sensor_locations: List[Location] = [] # Locations of sensors that detected oil
+        self.water_sensor_locations: List[Location] = [] # Locations of sensors that detected only water
+        self.estimated_hull: Optional[ConvexHull] = None
+        self.hull_vertices: Optional[np.ndarray] = None # Store vertices [[x1,y1], [x2,y2], ...]
 
     def reset(self):
         """Clears stored points and estimate."""
-        self.oil_points = []
-        self.water_points = []
-        self.estimated_spill = None
+        self.oil_sensor_locations = []
+        self.water_sensor_locations = []
+        self.estimated_hull = None
+        self.hull_vertices = None
 
-    def add_measurement(self, sensor_location: Location, is_oil: bool):
-        """Adds a single sensor measurement."""
-        if is_oil:
-            self.oil_points.append(sensor_location)
+    def add_measurement(self, sensor_location: Location, is_oil_detected: bool):
+        """Adds the location of a sensor based on its detection status."""
+        if is_oil_detected:
+            # Avoid adding duplicate locations precisely
+            if not any(abs(p.x - sensor_location.x) < 1e-6 and abs(p.y - sensor_location.y) < 1e-6 for p in self.oil_sensor_locations):
+                self.oil_sensor_locations.append(sensor_location)
         else:
-            self.water_points.append(sensor_location)
+             if not any(abs(p.x - sensor_location.x) < 1e-6 and abs(p.y - sensor_location.y) < 1e-6 for p in self.water_sensor_locations):
+                self.water_sensor_locations.append(sensor_location)
 
-    def _minimum_enclosing_circle(self, points: np.ndarray) -> Tuple[Tuple[float, float], float]:
-        """
-        Finds the minimum enclosing circle for a set of 2D points.
-        Uses Welzl's algorithm implicitly via standard library optimization.
-        Returns center (x, y) and radius.
-        """
-        if points.shape[0] == 0:
-            return (0.0, 0.0), 0.0
-        if points.shape[0] == 1:
-            return (points[0, 0], points[0, 1]), 0.0
-
-        # Objective function: radius squared
-        def objective(params):
-            cx, cy = params
-            center = np.array([cx, cy])
-            distances_sq = np.sum((points - center)**2, axis=1)
-            return np.max(distances_sq) # Minimize max squared distance (radius^2)
-
-        # Initial guess: centroid of the points
-        centroid = np.mean(points, axis=0)
-        initial_guess = centroid
-
-        # Bounds (optional but can help) - based on data range
-        min_coords = np.min(points, axis=0)
-        max_coords = np.max(points, axis=0)
-        bounds = [(min_coords[0], max_coords[0]), (min_coords[1], max_coords[1])]
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning) # Ignore potential overflow/underflow
-            result = minimize(objective, initial_guess, method='Nelder-Mead', options={'adaptive': True}) # Simpler method
-
-        if result.success:
-            center_x, center_y = result.x
-            radius_sq = result.fun
-            radius = np.sqrt(max(0, radius_sq)) # Ensure non-negative radius
-            return (center_x, center_y), radius
-        else:
-            # Fallback if optimization fails: use centroid and max distance
-            print("Warning: Minimum enclosing circle optimization failed. Using fallback.")
-            centroid = np.mean(points, axis=0)
-            distances = np.sqrt(np.sum((points - centroid)**2, axis=1))
-            radius = np.max(distances) if distances.size > 0 else 0.0
-            return (centroid[0], centroid[1]), radius
 
     def estimate_spill(self):
         """
-        Estimates the spill shape (circle) based on collected points.
-        Updates self.estimated_spill.
+        Estimates the spill shape (convex hull) based on collected oil sensor locations.
+        Updates self.estimated_hull and self.hull_vertices.
         """
-        if len(self.oil_points) < self.config.min_oil_points_for_estimate:
-            # Not enough data, keep previous estimate or None
+        self.estimated_hull = None # Reset estimate before trying
+        self.hull_vertices = None
+
+        if len(self.oil_sensor_locations) < self.config.min_oil_points_for_estimate:
+            # Not enough data to form a meaningful hull
             return
 
-        oil_points_np = np.array([[p.x, p.y] for p in self.oil_points])
+        # Convert locations to numpy array for ConvexHull
+        oil_points_np = np.array([[p.x, p.y] for p in self.oil_sensor_locations])
+
+        # Ensure we have enough unique points for hull calculation
+        unique_oil_points = np.unique(oil_points_np, axis=0)
+        if unique_oil_points.shape[0] < 3:
+            # ConvexHull requires at least 3 non-collinear points
+            # print("Mapper: Not enough unique points for hull.")
+            return
 
         try:
-            # Option 1: Minimum Enclosing Circle of oil points
-            center_coords, radius = self._minimum_enclosing_circle(oil_points_np)
+            # Compute the convex hull
+            # Use warnings context manager to suppress Qhull precision warnings sometimes seen
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore") # Suppress Qhull precision warnings
+                hull = ConvexHull(unique_oil_points, qhull_options='QJ') # QJ ensures non-extreme points are included if collinear
 
-            # Optional Refinement using water points (simple version):
-            # Ensure the circle doesn't contain too many water points far inside.
-            # This part can be made more sophisticated.
-            if len(self.water_points) >= self.config.min_water_points_for_refinement:
-                 water_points_np = np.array([[p.x, p.y] for p in self.water_points])
-                 center_np = np.array(center_coords)
-                 distances_to_water = np.sqrt(np.sum((water_points_np - center_np)**2, axis=1))
-                 # Find water points inside the current estimate
-                 water_inside_indices = np.where(distances_to_water < radius - 1e-6)[0] # Add tolerance
-                 if len(water_inside_indices) > 0:
-                      # Simple shrink: Reduce radius to just exclude the furthest water point inside
-                      max_dist_water_inside = np.max(distances_to_water[water_inside_indices])
-                      radius = max(0.1, max_dist_water_inside) # Shrink radius, ensure minimum size
-
-            est_center = Location(x=center_coords[0], y=center_coords[1])
-            self.estimated_spill = OilSpillCircle(center=est_center, radius=max(0.1, radius)) # Ensure min radius
+            self.estimated_hull = hull
+            # Get the vertices of the hull in order
+            self.hull_vertices = unique_oil_points[hull.vertices]
 
         except Exception as e:
-            print(f"Error during spill estimation: {e}")
-            # Keep previous estimate or None if error occurs
-            pass
+            # This can happen with collinear points or other Qhull errors
+            # print(f"Mapper: Error during Convex Hull computation: {e}")
+            self.estimated_hull = None
+            self.hull_vertices = None
+            pass # Keep estimate as None if error occurs
 
+    def is_inside_estimate(self, point: Location) -> bool:
+        """
+        Checks if a given point (Location object) is inside the estimated convex hull.
+        Uses Delaunay triangulation method for robustness.
+        Returns True if inside or on the boundary, False otherwise.
+        """
+        if self.estimated_hull is None or self.hull_vertices is None or len(self.hull_vertices) < 3:
+            return False # Cannot check if no valid hull exists
+
+        point_np = np.array([point.x, point.y])
+
+        # Use Delaunay triangulation of the hull vertices to check point inclusion
+        # This is generally more robust than using equations directly for edge cases
+        try:
+            # Create Delaunay triangulation from the *hull* vertices
+            # Need at least 3 points for Delaunay
+            if len(self.hull_vertices) < 3:
+                 return False
+
+            # Add a small tolerance to Qhull options if needed
+            # For example, 'QJ' (joggle input) can help with precision issues
+            delaunay_hull = Delaunay(self.hull_vertices, qhull_options='QJ')
+
+            # find_simplex returns -1 if point is outside the triangulation
+            return delaunay_hull.find_simplex(point_np) >= 0
+        except Exception as e:
+             # Errors can occur if points are perfectly collinear after QJ, etc.
+             # print(f"Mapper: Delaunay check failed: {e}")
+             return False # Assume outside if check fails
+
+    def get_estimated_area(self) -> float:
+        """Returns the area of the estimated convex hull. Returns 0 if no hull."""
+        if self.estimated_hull is None:
+            return 0.0
+        try:
+            return self.estimated_hull.volume # In 2D, 'volume' attribute gives area
+        except AttributeError:
+            return 0.0 # Should have volume attribute if hull exists
