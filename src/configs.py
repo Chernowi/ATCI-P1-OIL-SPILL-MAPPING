@@ -1,3 +1,4 @@
+# --- START OF FILE configs.py ---
 from typing import Dict, Literal, Tuple, List, Any
 from pydantic import BaseModel, Field
 import math
@@ -14,15 +15,18 @@ class SACConfig(BaseModel):
     hidden_dims: List[int] = Field([256, 256], description="List of hidden layer dimensions for MLP part")
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
     log_std_max: int = Field(1, description="Maximum log std for action distribution")
-    lr: float = Field(1e-6, description="Learning rate")
+    lr: float = Field(3e-5, description="Learning rate") # MODIFIED: Increased LR
     gamma: float = Field(0.99, description="Discount factor")
-    tau: float = Field(0.001, description="Target network update rate")
+    tau: float = Field(0.005, description="Target network update rate") # MODIFIED: Slightly faster updates
     alpha: float = Field(0.2, description="Temperature parameter (Initial value if auto-tuning)")
     auto_tune_alpha: bool = Field(True, description="Whether to auto-tune the alpha parameter")
     use_rnn: bool = Field(False, description="Whether to use RNN layers in Actor/Critic")
     rnn_type: Literal['lstm', 'gru'] = Field('lstm', description="Type of RNN cell (Only used if use_rnn is True)")
     rnn_hidden_size: int = Field(128, description="Hidden size of RNN layers (Only used if use_rnn is True)")
     rnn_num_layers: int = Field(1, description="Number of RNN layers (Only used if use_rnn is True)")
+    use_state_normalization: bool = Field(True, description="Enable/disable state normalization using RunningMeanStd")
+    # --- ADDED ---
+    use_reward_normalization: bool = Field(True, description="Enable/disable reward normalization by batch std dev")
 
 class TSACConfig(SACConfig):
     """Configuration for the Transformer-SAC agent, inheriting from SACConfig"""
@@ -34,6 +38,10 @@ class TSACConfig(SACConfig):
     use_layer_norm_actor: bool = Field(True, description="Apply Layer Normalization in Actor MLP layers")
     alpha: float = Field(0.1, description="Temperature parameter (Initial value if auto-tuning)")
     lr: float = Field(1e-4, description="Learning rate for T-SAC")
+    use_state_normalization: bool = Field(True, description="Enable/disable state normalization using RunningMeanStd")
+    # --- ADDED ---
+    use_reward_normalization: bool = Field(True, description="Enable/disable reward normalization by batch std dev")
+
 
 class PPOConfig(BaseModel):
     """Configuration for the PPO agent"""
@@ -52,7 +60,12 @@ class PPOConfig(BaseModel):
     value_coef: float = Field(0.5, description="Value loss coefficient")
     batch_size: int = Field(64, description="Batch size for training")
     steps_per_update: int = Field(2048, description="Environment steps between PPO updates")
+    use_state_normalization: bool = Field(True, description="Enable/disable state normalization using RunningMeanStd")
+    # --- ADDED ---
+    use_reward_normalization: bool = Field(True, description="Enable/disable reward normalization by batch std dev")
 
+
+# ... (Keep other classes like ReplayBufferConfig, MapperConfig, etc. unchanged) ...
 
 class ReplayBufferConfig(BaseModel):
     """Configuration for the replay buffer (SAC/TSAC)"""
@@ -131,24 +144,26 @@ class WorldConfig(BaseModel):
     oil_spill: OilSpillConfig = Field(default_factory=OilSpillConfig, description="True oil spill configuration")
 
     trajectory_length: int = Field(10, description="Number of steps (N) included in the trajectory state (SAC/TSAC)")
-    trajectory_feature_dim: int = Field(CORE_STATE_DIM + CORE_ACTION_DIM + TRAJECTORY_REWARD_DIM, description="Dimension of features per step in trajectory state (basic_state + prev_action + prev_reward)") # 7+1+1=9
+    trajectory_feature_dim: int = Field(CORE_STATE_DIM + CORE_ACTION_DIM + TRAJECTORY_REWARD_DIM, description="Dimension of features per step in trajectory state (basic_state + prev_action + prev_reward)")
 
     # --- Termination Conditions ---
     success_iou_threshold: float = Field(0.90, description="IoU between estimated and true spill above which the episode is successful")
+    max_distance_from_start: float = Field(100.0, description="Maximum distance agent can travel from start before termination.")
 
-    # --- Reward Function Parameters (INCENTIVIZE SPEED) ---
-    base_iou_reward_scale: float = Field(0.5, description="Scaling factor for CURRENT IoU-based reward") # Increased slightly
-    iou_improvement_scale: float = Field(1.0, description="Scaling factor for IoU *improvement* reward") # Increased slightly
-    step_penalty: float = Field(0.05, description="Penalty subtracted each step to encourage speed") # Increased significantly
-    success_bonus: float = Field(5.0, description="Bonus reward for reaching success_iou_threshold") # Increased significantly
-    uninitialized_mapper_penalty: float = Field(0.1, description="Penalty applied if the mapper hasn't produced a valid estimate yet") # Increased slightly
+    # --- Reward Function Parameters ---
+    base_iou_reward_scale: float = Field(0.5, description="Scaling factor for CURRENT IoU-based reward")
+    iou_improvement_scale: float = Field(1.0, description="Scaling factor for IoU *improvement* reward")
+    step_penalty: float = Field(0.005, description="Penalty subtracted each step to encourage speed")
+    success_bonus: float = Field(5.0, description="Bonus reward for reaching success_iou_threshold")
+    uninitialized_mapper_penalty: float = Field(0.001, description="Penalty applied if the mapper hasn't produced a valid estimate yet")
 
     # --- Distance Penalty ---
     distance_penalty_type: Literal['linear', 'log', 'quadratic', 'none'] = Field('linear', description="Type of distance penalty ('linear', 'log', 'quadratic', 'none')")
-    distance_penalty_scale: float = Field(0.005, description="Scale for the distance penalty (applied based on type)") # Moderate linear penalty
+    distance_penalty_scale: float = Field(0.0005, description="Scale for the distance penalty (applied based on type)")
+    far_distance_penalty: float = Field(10.0, description="Large penalty applied when max_distance_from_start is exceeded.")
 
-    proximity_to_spill_scale: float = Field(0.1, description="Reward scale for being near estimated spill boundary") # Increased slightly
-    new_oil_detection_bonus: float = Field(0.05, description="Bonus for detecting oil with any sensor *when an estimate exists*") # Increased slightly
+    proximity_to_spill_scale: float = Field(0.1, description="Reward scale for being near estimated spill boundary")
+    new_oil_detection_bonus: float = Field(0.05, description="Bonus for detecting oil with any sensor *when an estimate exists*")
     # --- End Reward Parameters ---
 
     mapper_config: MapperConfig = Field(default_factory=MapperConfig, description="Configuration for the mapper")
@@ -174,38 +189,37 @@ class DefaultConfig(BaseModel):
 
 
 # --- Define Specific Configurations ---
+sac_default_config = SACConfig(lr=3e-4, tau=0.005, use_state_normalization=True, use_reward_normalization=True)
+tsac_default_config = TSACConfig(lr=1e-4, use_state_normalization=True, use_reward_normalization=True)
+ppo_default_config = PPOConfig(use_state_normalization=True, use_reward_normalization=True)
 
-# ** Reward parameters modified above directly in WorldConfig for simplicity, **
-# ** affecting all configs unless overridden below.                       **
-default_mapping_config = DefaultConfig()
+
+default_mapping_config = DefaultConfig(sac=sac_default_config)
 default_mapping_config.algorithm = "sac"
 default_mapping_config.training.models_dir = "models/sac_mapping/"
-# Note: reward parameters set in WorldConfig definition will apply here
 
 
-sac_rnn_config = DefaultConfig()
+sac_rnn_config = DefaultConfig(sac=sac_default_config)
 sac_rnn_config.algorithm = "sac"
 sac_rnn_config.sac.use_rnn = True
 sac_rnn_config.training.models_dir = "models/sac_rnn_mapping/"
-# Will inherit the speed-incentivized reward settings unless overridden here
 
-# PPO config
-ppo_mapping_config = DefaultConfig()
+
+ppo_mapping_config = DefaultConfig(ppo=ppo_default_config)
 ppo_mapping_config.algorithm = "ppo"
 ppo_mapping_config.training.models_dir = "models/ppo_mapping/"
-# Will inherit the speed-incentivized reward settings
 
-# T-SAC config
-tsac_mapping_config = DefaultConfig()
+
+tsac_mapping_config = DefaultConfig(tsac=tsac_default_config)
 tsac_mapping_config.algorithm = "tsac"
 tsac_mapping_config.training.models_dir = "models/tsac_mapping/"
-# Will inherit the speed-incentivized reward settings
 
 
 # Dictionary to access configurations by name
 CONFIGS: Dict[str, DefaultConfig] = {
-    "default_mapping": default_mapping_config, # Default is SAC with speed-incentivized reward settings
+    "default_mapping": default_mapping_config,
     "sac_rnn_mapping":  sac_rnn_config,
     "ppo_mapping": ppo_mapping_config,
     "tsac_mapping": tsac_mapping_config,
 }
+# --- END OF FILE configs.py ---
