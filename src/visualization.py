@@ -7,7 +7,7 @@ import math
 from world import World # Mapping world
 from world_objects import Location
 import imageio.v2 as imageio
-from PIL import Image
+from PIL import Image # Import PIL for potential resizing fallback
 import glob
 from configs import VisualizationConfig
 from typing import List
@@ -123,7 +123,8 @@ def visualize_world(world: World, vis_config: VisualizationConfig, filename: str
     ax.set_aspect('equal', adjustable='box')
     # Place legend outside plot area
     ax.legend(fontsize='small', loc='upper left', bbox_to_anchor=(1.02, 1.0))
-    plt.tight_layout(rect=[0, 0, 0.85, 1]) # Adjust layout to make space for legend
+    # Adjust layout to make space for legend, *before* saving
+    plt.tight_layout(rect=[0, 0, 0.85, 1])
 
     # --- Save Figure ---
     if filename is None:
@@ -132,7 +133,8 @@ def visualize_world(world: World, vis_config: VisualizationConfig, filename: str
 
     full_path = os.path.join(save_dir, filename)
     try:
-        plt.savefig(full_path, bbox_inches='tight') # Use bbox_inches='tight'
+        # Save WITHOUT bbox_inches='tight' to maintain consistent size
+        plt.savefig(full_path) # Removed bbox_inches='tight'
         plt.close(fig)
         return full_path
     except Exception as e:
@@ -150,6 +152,7 @@ def reset_trajectories():
 def save_gif(output_filename: str, vis_config: VisualizationConfig, frame_paths: list, delete_frames: bool = True):
     """
     Create a GIF from a list of frame image paths.
+    Includes fallback resizing if frames have inconsistent shapes.
     """
     if not frame_paths:
         print("No frame paths provided to create GIF."); return None
@@ -162,14 +165,43 @@ def save_gif(output_filename: str, vis_config: VisualizationConfig, frame_paths:
     try:
         images = []
         valid_frame_paths = []
-        for frame_path in frame_paths:
-            if os.path.exists(frame_path):
-                 images.append(imageio.imread(frame_path))
-                 valid_frame_paths.append(frame_path) # Only keep track of files actually read
-            else: print(f"Warning: Frame file not found during GIF creation: {frame_path}")
-        if not images: print("Error: No valid frames found for GIF."); return None
+        target_size = None # Determine size from the first valid frame
 
-        imageio.mimsave(output_path, images, duration=duration) # Use keyword 'duration'
+        for i, frame_path in enumerate(frame_paths):
+            if os.path.exists(frame_path):
+                try:
+                    # Read using Pillow (PIL fork) which is often more robust
+                    img_pil = Image.open(frame_path).convert('RGB') # Ensure consistent 3 channels
+
+                    if target_size is None:
+                        target_size = img_pil.size # Get (width, height) from first frame
+
+                    # Resize if needed (and target_size is known)
+                    if img_pil.size != target_size:
+                        print(f"Warning: Resizing frame {os.path.basename(frame_path)} from {img_pil.size} to {target_size}")
+                        img_pil = img_pil.resize(target_size, Image.Resampling.LANCZOS)
+
+                    # Convert PIL Image to numpy array for imageio
+                    images.append(np.array(img_pil))
+                    valid_frame_paths.append(frame_path) # Only keep track of files actually processed
+
+                except Exception as read_err:
+                     print(f"Error reading or processing frame {frame_path}: {read_err}")
+
+            else: print(f"Warning: Frame file not found during GIF creation: {frame_path}")
+
+        if not images: print("Error: No valid frames found/processed for GIF."); return None
+
+        # Final check shapes just before saving (for debugging)
+        first_shape = images[0].shape
+        for idx, img_arr in enumerate(images):
+            if img_arr.shape != first_shape:
+                # This indicates a problem even after resize attempt, or the first frame was bad.
+                print(f"CRITICAL ERROR: Frame {idx} shape {img_arr.shape} mismatch with first frame {first_shape}. Aborting GIF save.")
+                # Optionally try forcing resize based on first *good* frame, but simpler to abort here.
+                return None
+
+        imageio.mimsave(output_path, images, duration=duration)
         print(f"GIF saved successfully.")
 
         if delete_frames:
@@ -181,4 +213,11 @@ def save_gif(output_filename: str, vis_config: VisualizationConfig, frame_paths:
                 except OSError as e: print(f"Warn: Could not delete frame {frame_path}: {e}")
             if deleted_count > 0: print(f"Deleted {deleted_count} frame files.")
         return output_path
-    except Exception as e: print(f"Error creating GIF {output_path}: {e}"); return None
+
+    except Exception as e:
+        print(f"Error creating GIF {output_path}: {e}")
+        # Print shape info if exception occurs during mimsave
+        if 'images' in locals() and images:
+             shapes = [img.shape for img in images]
+             print(f"Frame shapes before error: {shapes}")
+        return None

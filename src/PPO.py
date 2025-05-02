@@ -32,11 +32,11 @@ class PPOMemory:
     def store(self, normalized_basic_state, action, probs, vals, reward, done):
         """Store a transition corresponding to taking 'action' in 'normalized_basic_state'."""
         if not isinstance(normalized_basic_state, tuple) or len(normalized_basic_state) != CORE_STATE_DIM:
-            print(f"Warning: PPO Memory storing state with unexpected format/length: {type(normalized_basic_state)}, len={len(normalized_basic_state) if isinstance(normalized_basic_state, tuple) else 'N/A'}. Expected tuple of length {CORE_STATE_DIM}.")
-            return
+            # print(f"Warning: PPO Memory storing state with unexpected format/length: {type(normalized_basic_state)}, len={len(normalized_basic_state) if isinstance(normalized_basic_state, tuple) else 'N/A'}. Expected tuple of length {CORE_STATE_DIM}.")
+            return # Reduced verbosity
         # Check for NaNs in the state tuple itself
         if any(np.isnan(x) for x in normalized_basic_state):
-            print(f"Warning: NaN detected in PPO state to be stored: {normalized_basic_state}. Skipping store.")
+            # print(f"Warning: NaN detected in PPO state to be stored: {normalized_basic_state}. Skipping store.")
             return # Avoid storing NaN states
 
         self.states.append(normalized_basic_state)
@@ -63,11 +63,6 @@ class PPOMemory:
             states_arr = np.array(self.states, dtype=np.float32)
             if np.isnan(states_arr).any():
                  print("Error: NaN found in PPO memory states_arr during batch generation!")
-                 # Optionally, find and report the index of NaN
-                 # nan_indices = np.where(np.isnan(states_arr))
-                 # print(f"NaN found at indices: {nan_indices}")
-                 # Find original state causing issue (difficult without more context)
-                 # self.clear() # Clear memory if NaN occurs
                  return None, None, None, None, None, None, None
 
             actions_arr = np.array(self.actions, dtype=np.float32).reshape(-1, 1)
@@ -163,7 +158,7 @@ class ValueNetwork(nn.Module):
         return value
 
 class PPO:
-    """Proximal Policy Optimization algorithm implementation with optional state normalization."""
+    """Proximal Policy Optimization algorithm implementation with optional state/reward normalization."""
     def __init__(self, config: PPOConfig, device: torch.device = None):
         self.config = config
         self.gamma = config.gamma
@@ -176,8 +171,7 @@ class PPO:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"PPO Agent using device: {self.device}")
 
-        # --- Agent-Level Normalization ---
-        # This normalizes the potentially already-normalized state from the world
+        # --- Agent-Level State Normalization ---
         self.use_state_normalization = config.use_state_normalization
         self.state_normalizer = None
         if self.use_state_normalization:
@@ -185,7 +179,15 @@ class PPO:
             print(f"PPO Agent state normalization ENABLED for dim: {self.state_dim} (operates on world's output state)")
         else:
             print(f"PPO Agent state normalization DISABLED.")
-        # --- End Agent-Level Normalization ---
+        # --- End Agent-Level State Normalization ---
+
+        # --- Agent-Level Reward Normalization --- # MODIFIED
+        self.use_reward_normalization = config.use_reward_normalization
+        if self.use_reward_normalization:
+             print("PPO Agent reward normalization ENABLED (within GAE calculation).")
+        else:
+             print("PPO Agent reward normalization DISABLED.")
+        # --- End Agent-Level Reward Normalization --- # END MODIFIED
 
         self.actor = PolicyNetwork(config).to(self.device)
         self.critic = ValueNetwork(config).to(self.device)
@@ -251,10 +253,7 @@ class PPO:
                   self.memory.dones[-1] = done
              else:
                   # This state already has reward/done, likely from a previous step's update.
-                  # This can happen if store_reward_done is called multiple times before the next store().
-                  # Avoid adding duplicate entries or overwriting real values.
-                  # print("Debug: store_reward_done called but last entry seems complete.")
-                  pass
+                  pass # Reduced verbosity
         # else: memory is empty or lengths mismatch unexpectedly
 
 
@@ -278,6 +277,7 @@ class PPO:
         # --- End Update ---
 
         # Compute Advantages and Returns using GAE
+        # Reward normalization happens INSIDE this function if enabled
         advantages, returns = self._compute_advantages_returns(rewards_arr, dones_arr, values_arr.squeeze())
         if advantages is None:
             print("Error: Failed to compute returns/advantages. Skipping PPO update.")
@@ -314,7 +314,7 @@ class PPO:
                 batch_actions = actions_arr_tensor[batch_indices]
                 batch_old_log_probs = old_log_probs_arr_tensor[batch_indices]
                 batch_advantages = advantages_tensor[batch_indices]
-                batch_returns = returns_tensor[batch_indices]
+                batch_returns = returns_tensor[batch_indices] # These returns are based on potentially normalized rewards
 
                 # Evaluate current policy on potentially re-normalized states
                 new_log_probs, entropy = self.actor.evaluate(batch_network_input, batch_actions)
@@ -326,6 +326,7 @@ class PPO:
                 surr1 = ratio * batch_advantages
                 surr2 = torch.clamp(ratio, 1.0 - self.policy_clip, 1.0 + self.policy_clip) * batch_advantages
                 actor_loss = -torch.min(surr1, surr2).mean()
+                # Critic loss compares current value prediction with GAE returns (based on potentially normalized rewards)
                 critic_loss = F.mse_loss(new_values, batch_returns)
                 entropy_loss = -entropy.mean()
                 total_loss = actor_loss + self.value_coef * critic_loss + self.entropy_coef * entropy_loss
@@ -352,13 +353,32 @@ class PPO:
         return {'actor_loss': avg_actor_loss, 'critic_loss': avg_critic_loss, 'entropy': avg_entropy}
 
 
-    def _compute_advantages_returns(self, rewards, dones, values):
-        """Compute advantages and returns using GAE."""
+    # MODIFIED Function Signature and Implementation
+    def _compute_advantages_returns(self, rewards: np.ndarray, dones: np.ndarray, values: np.ndarray):
+        """Compute advantages and returns using GAE, optionally normalizing rewards."""
         n_steps = len(rewards)
         advantages = np.zeros(n_steps, dtype=np.float32)
         returns = np.zeros(n_steps, dtype=np.float32)
         last_gae_lam = 0.0
         last_value = 0.0 # V(s_N)
+
+        # --- Conditionally Normalize Rewards ---
+        rewards_to_use = rewards # Default to raw rewards
+        if self.use_reward_normalization:
+            if n_steps > 1: # Need at least 2 rewards to compute std dev
+                 reward_mean = np.mean(rewards)
+                 reward_std = np.std(rewards)
+                 # Avoid division by zero if std is very small
+                 if reward_std > 1e-8:
+                      rewards_to_use = (rewards - reward_mean) / reward_std
+                 else:
+                      # If std is near zero, just center the rewards
+                      rewards_to_use = rewards - reward_mean
+                      # print("Info: PPO Reward std near zero, only centering rewards.")
+            # else: Cannot normalize single reward, use raw value
+
+        # --- End Conditional Reward Normalization ---
+
 
         # Estimate value of the last state V(s_N) if the episode didn't end
         if not dones[-1]: # If the last transition was not terminal
@@ -376,7 +396,6 @@ class PPO:
                     # --- End Conditional ---
                     last_value = self.critic(network_input_last).cpu().numpy()[0, 0]
             else:
-                # This shouldn't happen if update_parameters checks len(memory) > 0
                 print("Warning: GAE calculation attempted with empty memory states after non-terminal step.")
                 return None, None # Cannot compute if memory is empty
 
@@ -389,15 +408,19 @@ class PPO:
                 next_non_terminal = 1.0 - dones[t]
                 next_value = values[t+1] # Use critic's prediction for V(s_{t+1})
 
-            # Calculate TD error (delta)
-            delta = rewards[t] + self.gamma * next_value * next_non_terminal - values[t]
+            # Calculate TD error (delta) using potentially normalized rewards
+            delta = rewards_to_use[t] + self.gamma * next_value * next_non_terminal - values[t]
             # Calculate GAE for this step
             last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
             advantages[t] = last_gae_lam
 
         # Calculate returns by adding advantages to values
+        # Note: Values are predictions based on potentially normalized states,
+        # and advantages are derived from potentially normalized rewards.
+        # The relationship Return = Advantage + Value holds regardless of reward normalization.
         returns = advantages + values
         return advantages, returns
+    # --- END MODIFIED Function ---
 
     def save_model(self, path: str):
         print(f"Saving PPO model to {path}...")
@@ -407,6 +430,7 @@ class PPO:
             'actor_optimizer_state_dict': self.actor_optimizer.state_dict(),
             'critic_optimizer_state_dict': self.critic_optimizer.state_dict(),
             'use_state_normalization': self.use_state_normalization, # Save the flag
+            'use_reward_normalization': self.use_reward_normalization, # Save reward norm flag
             'device_type': self.device.type
         }
         # --- Conditionally save normalizer ---
@@ -426,10 +450,10 @@ class PPO:
         self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])
         self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer_state_dict'])
 
-        # --- Load Normalizer State Conditionally ---
-        loaded_use_norm = checkpoint.get('use_state_normalization', True) # Default True if missing
-        if 'use_state_normalization' in checkpoint and loaded_use_norm != self.use_state_normalization:
-            print(f"Warning: Loaded model normalization setting ({loaded_use_norm}) differs from current config ({self.use_state_normalization}). Using current config setting.")
+        # --- Load State Normalizer State Conditionally ---
+        loaded_use_state_norm = checkpoint.get('use_state_normalization', True) # Default True if missing
+        if 'use_state_normalization' in checkpoint and loaded_use_state_norm != self.use_state_normalization:
+            print(f"Warning: Loaded model STATE normalization setting ({loaded_use_state_norm}) differs from current config ({self.use_state_normalization}). Using current config setting.")
 
         if self.use_state_normalization and self.state_normalizer:
             if 'state_normalizer_state_dict' in checkpoint:
@@ -441,8 +465,14 @@ class PPO:
             else:
                 print("Warning: PPO state normalizer statistics not found in checkpoint, but normalization is enabled. Using initial values.")
         elif not self.use_state_normalization and 'state_normalizer_state_dict' in checkpoint:
-             print("Warning: Checkpoint contains PPO normalizer stats, but normalization is disabled in current config. Ignoring saved stats.")
-        # --- End Load Normalizer ---
+             print("Warning: Checkpoint contains PPO state normalizer stats, but normalization is disabled in current config. Ignoring saved stats.")
+        # --- End Load State Normalizer ---
+
+        # --- Load Reward Normalization Flag --- # MODIFIED
+        loaded_use_reward_norm = checkpoint.get('use_reward_normalization', True) # Default True if missing
+        if 'use_reward_normalization' in checkpoint and loaded_use_reward_norm != self.use_reward_normalization:
+             print(f"Warning: Loaded model REWARD normalization setting ({loaded_use_reward_norm}) differs from current config ({self.use_reward_normalization}). Using current config setting.")
+        # --- End Load Reward Normalization Flag --- # END MODIFIED
 
         self.actor.train()
         self.critic.train()
@@ -463,6 +493,17 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
 
     log_dir = os.path.join("runs", f"ppo_pointcloud_{int(time.time())}") # Changed log dir name
     os.makedirs(log_dir, exist_ok=True)
+
+    # --- Save Configuration ---
+    config_save_path = os.path.join(log_dir, "config.json")
+    try:
+        with open(config_save_path, "w") as f:
+            f.write(config.model_dump_json(indent=2))
+        print(f"Configuration saved to: {config_save_path}")
+    except Exception as e:
+        print(f"Error saving configuration to {config_save_path}: {e}")
+    # --- End Save Configuration ---
+
     writer = SummaryWriter(log_dir=log_dir)
     print(f"TensorBoard logs: {log_dir}")
 
@@ -488,7 +529,7 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
         print("PPO Training using CPU.")
     # --- End Device Setup ---
 
-    # Agent initialization now uses the config flag
+    # Agent initialization now uses the config flag (handles norm printouts internally)
     agent = PPO(config=ppo_config, device=device)
     os.makedirs(train_config.models_dir, exist_ok=True)
 

@@ -260,11 +260,15 @@ class TSAC:
         for p in self.critic1_target.parameters(): p.requires_grad = False
         for p in self.critic2_target.parameters(): p.requires_grad = False
 
-        actor_lr = config.lr
-        critic_lr = config.lr
-        if hasattr(config, 'critic_lr') and config.critic_lr is not None:
-             critic_lr = config.critic_lr
-             print(f"Using separate T-SAC critic LR: {critic_lr}")
+        # Use potentially separate LRs from config
+        actor_lr = config.actor_lr if hasattr(config, 'actor_lr') else config.lr # Default to single LR if actor_lr missing
+        critic_lr = config.critic_lr if hasattr(config, 'critic_lr') else config.lr # Default to single LR if critic_lr missing
+
+        if actor_lr != critic_lr:
+            print(f"Using separate T-SAC LRs: Actor={actor_lr}, Critic={critic_lr}")
+        else:
+            print(f"Using single T-SAC LR: {actor_lr}")
+
 
         self.actor_optimizer = optim.AdamW(self.actor.parameters(), lr=actor_lr, weight_decay=1e-4)
         self.critic1_optimizer = optim.AdamW(self.critic1.parameters(), lr=critic_lr, weight_decay=1e-4)
@@ -273,6 +277,7 @@ class TSAC:
         if self.auto_tune_alpha:
             self.target_entropy = -torch.prod(torch.Tensor([self.action_dim]).to(self.device)).item()
             self.log_alpha = nn.Parameter(torch.tensor(np.log(self.alpha), device=self.device, dtype=torch.float32))
+            # Use actor_lr for alpha optimizer
             self.alpha_optimizer = optim.AdamW([self.log_alpha], lr=actor_lr, weight_decay=1e-4)
         else:
             self.log_alpha = torch.tensor(np.log(self.alpha), device=self.device, dtype=torch.float32)
@@ -611,7 +616,7 @@ class TSAC:
                      if not self.log_alpha.requires_grad: self.log_alpha.requires_grad_(True) # Ensure grad enabled
                 else: print("Warn: log_alpha_value not found in checkpoint for auto-tuning alpha.")
 
-                actor_lr = self.config.lr # Use actor LR for alpha optimizer by default
+                actor_lr = self.config.actor_lr # Use actor LR for alpha optimizer
                 self.alpha_optimizer = optim.AdamW([self.log_alpha], lr=actor_lr, weight_decay=1e-4)
                 if 'alpha_optimizer_state_dict' in checkpoint:
                      try: self.alpha_optimizer.load_state_dict(checkpoint['alpha_optimizer_state_dict'])
@@ -686,6 +691,18 @@ def train_tsac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluatio
 
     log_dir = os.path.join("runs", f"tsac_pointcloud_{int(time.time())}") # Changed log dir name
     os.makedirs(log_dir, exist_ok=True)
+
+    # --- Save Configuration --- # MODIFIED
+    config_save_path = os.path.join(log_dir, "config.json")
+    try:
+        with open(config_save_path, "w") as f:
+            # Use model_dump_json for Pydantic v2+ with indent for readability
+            f.write(config.model_dump_json(indent=2))
+        print(f"Configuration saved to: {config_save_path}")
+    except Exception as e:
+        print(f"Error saving configuration to {config_save_path}: {e}")
+    # --- End Save Configuration --- # END MODIFIED
+
     writer = SummaryWriter(log_dir=log_dir)
     print(f"TensorBoard logs: {log_dir}")
 

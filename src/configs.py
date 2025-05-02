@@ -52,8 +52,8 @@ class PPOConfig(BaseModel):
     hidden_dim: int = Field(256, description="Hidden layer dimension")
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
     log_std_max: int = Field(2, description="Maximum log std for action distribution")
-    actor_lr: float = Field(5e-4, description="Actor learning rate") # Adjusted
-    critic_lr: float = Field(1e-3, description="Critic learning rate") # Adjusted
+    actor_lr: float = Field(5e-5, description="Actor learning rate") # Adjusted
+    critic_lr: float = Field(1e-4, description="Critic learning rate") # Adjusted
     gamma: float = Field(0.99, description="Discount factor")
     gae_lambda: float = Field(0.95, description="GAE lambda parameter")
     policy_clip: float = Field(0.2, description="PPO clipping parameter")
@@ -88,7 +88,6 @@ class TrainingConfig(BaseModel):
     learning_starts: int = Field(8000, description="Number of steps to collect before starting SAC/TSAC training updates")
     train_freq: int = Field(4, description="Update the policy every n environment steps (SAC/TSAC)")
     gradient_steps: int = Field(1, description="How many gradient steps to perform when training frequency is met (SAC/TSAC)")
-    training_seeds: List[int] = Field([], description="List of seeds for environment generation during training. Empty list uses random seeds.")
 
 # --- Evaluation Config ---
 class EvaluationConfig(BaseModel):
@@ -96,8 +95,6 @@ class EvaluationConfig(BaseModel):
     num_episodes: int = Field(10, description="Number of episodes for evaluation")
     max_steps: int = Field(500, description="Maximum steps per evaluation episode")
     render: bool = Field(True, description="Whether to render the evaluation")
-    evaluation_seeds: List[int] = Field([101, 102, 103, 104, 105, 106, 107, 108, 109, 110], description="List of seeds for environment generation during evaluation. Should match num_episodes.")
-
 
 # --- Pos/Vel/Randomization (Unchanged structure, but values relate to unnormalized world) ---
 class Position(BaseModel):
@@ -167,8 +164,7 @@ class WorldConfig(BaseModel):
     uninitialized_mapper_penalty: float = Field(0.005, description="Penalty applied if the mapper hasn't produced a valid estimate yet")
 
     mapper_config: MapperConfig = Field(default_factory=MapperConfig, description="Configuration for the mapper")
-    # Add evaluation seeds here (moved from EvaluationConfig for better world reset logic)
-    seeds: List[int] = Field([101, 102, 103, 104, 105, 106, 107, 108, 109, 110], description="List of seeds used for environment generation during evaluation/specific resets.")
+    seeds: List[int] = Field([110], description="List of seeds used for environment generation during evaluation/specific resets.")
 
 
 class DefaultConfig(BaseModel):
@@ -190,57 +186,37 @@ class DefaultConfig(BaseModel):
 
 
 # --- Define Specific Configurations ---
-# Reconfigure defaults slightly for the new setup using separate LRs
-sac_default_settings = SACConfig(
-    actor_lr=5e-5, critic_lr=5e-5, # Use previous LR for both actor/critic
-    tau=0.005, use_state_normalization=True, use_reward_normalization=True, use_rnn=False
-)
-tsac_default_settings = TSACConfig(
-    actor_lr=1.5e-4, critic_lr=1.5e-4, # Use previous LR for both actor/critic
-    alpha=0.1, use_state_normalization=True, use_reward_normalization=True
-)
-ppo_default_settings = PPOConfig(actor_lr=5e-4, critic_lr=1e-3, use_state_normalization=True, use_reward_normalization=True)
 
 # --- Default Mapping (SAC MLP) ---
-default_mapping_config = DefaultConfig(
-    sac=sac_default_settings.model_copy(), # Use a copy
-    ppo=ppo_default_settings.model_copy(),
-    tsac=tsac_default_settings.model_copy()
-)
+default_mapping_config = DefaultConfig()
 default_mapping_config.algorithm = "sac"
 default_mapping_config.training.models_dir = "models/sac_pointcloud/"
 
 
 # --- SAC RNN Mapping ---
 # Create a distinct SACConfig instance with RNN set to True
-sac_rnn_sac_settings = sac_default_settings.model_copy(update={'use_rnn': True})
-sac_rnn_config = DefaultConfig(
-    sac=sac_rnn_sac_settings, # Assign the RNN-specific settings
-    ppo=ppo_default_settings.model_copy(),
-    tsac=tsac_default_settings.model_copy()
-)
+sac_rnn_config = DefaultConfig()
+sac_rnn_config.sac.use_rnn = True # Enable RNN in SAC
 sac_rnn_config.algorithm = "sac" # Still SAC algorithm overall
 sac_rnn_config.training.models_dir = "models/sac_rnn_pointcloud/"
 
 
 # --- PPO Mapping ---
-ppo_mapping_config = DefaultConfig(
-    sac=sac_default_settings.model_copy(),
-    ppo=ppo_default_settings.model_copy(), # Use a copy
-    tsac=tsac_default_settings.model_copy()
-)
+ppo_mapping_config = DefaultConfig()
 ppo_mapping_config.algorithm = "ppo"
 ppo_mapping_config.training.models_dir = "models/ppo_pointcloud/"
 
 
 # --- TSAC Mapping ---
-tsac_mapping_config = DefaultConfig(
-    sac=sac_default_settings.model_copy(),
-    ppo=ppo_default_settings.model_copy(),
-    tsac=tsac_default_settings.model_copy() # Use a copy
-)
+tsac_mapping_config = DefaultConfig()
 tsac_mapping_config.algorithm = "tsac"
 tsac_mapping_config.training.models_dir = "models/tsac_pointcloud/"
+
+sparse_reward_config = DefaultConfig()
+sparse_reward_config.world.metric_improvement_scale = 0.0 # No improvement reward
+sparse_reward_config.world.new_oil_detection_bonus = 0.0 # No bonus for new oil detection
+sparse_reward_config.world.uninitialized_mapper_penalty = 0.0 # No penalty for uninitialized mapper
+sparse_reward_config.training.models_dir = "models/sparse_reward_mapping/" # Directory for sparse reward model
 
 
 # Dictionary to access configurations by name
@@ -249,4 +225,5 @@ CONFIGS: Dict[str, DefaultConfig] = {
     "sac_rnn_mapping":  sac_rnn_config,
     "ppo_mapping": ppo_mapping_config,
     "tsac_mapping": tsac_mapping_config,
+    "sac_sparse_reward": sparse_reward_config,
 }

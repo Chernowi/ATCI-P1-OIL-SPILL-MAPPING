@@ -659,6 +659,18 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
     name_in_logdir = "sac_pointcloud_rnn_" if config.sac.use_rnn else "sac_pointcloud_"
     log_dir = os.path.join("runs", name_in_logdir + str(int(time.time())))
     os.makedirs(log_dir, exist_ok=True)
+
+    # --- Save Configuration --- # MODIFIED
+    config_save_path = os.path.join(log_dir, "config.json")
+    try:
+        with open(config_save_path, "w") as f:
+            # Use model_dump_json for Pydantic v2+ with indent for readability
+            f.write(config.model_dump_json(indent=2))
+        print(f"Configuration saved to: {config_save_path}")
+    except Exception as e:
+        print(f"Error saving configuration to {config_save_path}: {e}")
+    # --- End Save Configuration --- # END MODIFIED
+
     writer = SummaryWriter(log_dir=log_dir)
     print(f"TensorBoard logs: {log_dir}")
 
