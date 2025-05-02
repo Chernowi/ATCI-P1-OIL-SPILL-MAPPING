@@ -16,9 +16,8 @@ class SACConfig(BaseModel):
     hidden_dims: List[int] = Field([256, 256], description="List of hidden layer dimensions for MLP part")
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
     log_std_max: int = Field(1, description="Maximum log std for action distribution")
-    # lr: float = Field(3e-5, description="Learning rate") # Removed single LR
-    actor_lr: float = Field(3e-5, description="Actor learning rate") # Added actor LR
-    critic_lr: float = Field(3e-5, description="Critic learning rate") # Added critic LR
+    actor_lr: float = Field(3e-5, description="Actor learning rate")
+    critic_lr: float = Field(3e-5, description="Critic learning rate")
     gamma: float = Field(0.99, description="Discount factor")
     tau: float = Field(0.005, description="Target network update rate")
     alpha: float = Field(0.2, description="Temperature parameter (Initial value if auto-tuning)")
@@ -29,6 +28,13 @@ class SACConfig(BaseModel):
     rnn_num_layers: int = Field(1, description="Number of RNN layers (Only used if use_rnn is True)")
     use_state_normalization: bool = Field(False, description="Enable/disable state normalization using RunningMeanStd (operates on potentially already normalized coords)")
     use_reward_normalization: bool = Field(True, description="Enable/disable reward normalization by batch std dev")
+    # --- PER Parameters ---
+    use_per: bool = Field(False, description="Enable Prioritized Experience Replay")
+    per_alpha: float = Field(0.6, description="PER alpha (prioritization exponent)")
+    per_beta_start: float = Field(0.4, description="PER beta initial value (importance sampling exponent)")
+    per_beta_frames: int = Field(100000, description="PER beta annealing frames (relative to training updates)")
+    per_epsilon: float = Field(1e-5, description="PER epsilon (small value added to priorities)")
+
 
 class TSACConfig(SACConfig):
     """Configuration for the Transformer-SAC agent, inheriting from SACConfig"""
@@ -39,11 +45,12 @@ class TSACConfig(SACConfig):
     transformer_hidden_dim: int = Field(512, description="Hidden dimension within Transformer layers (FeedForward network)")
     use_layer_norm_actor: bool = Field(True, description="Apply Layer Normalization in Actor MLP layers")
     alpha: float = Field(0.1, description="Temperature parameter (Initial value if auto-tuning)")
-    # lr: float = Field(1.5e-4, description="Learning rate for T-SAC") # Removed single LR
-    actor_lr: float = Field(1.5e-4, description="Actor learning rate for T-SAC") # Added separate LRs
-    critic_lr: float = Field(1.5e-4, description="Critic learning rate for T-SAC") # Added separate LRs
+    actor_lr: float = Field(1.5e-4, description="Actor learning rate for T-SAC")
+    critic_lr: float = Field(1.5e-4, description="Critic learning rate for T-SAC")
     use_state_normalization: bool = Field(True, description="Enable/disable state normalization using RunningMeanStd (operates on potentially already normalized coords)")
     use_reward_normalization: bool = Field(True, description="Enable/disable reward normalization by batch std dev")
+    # Inherits PER parameters from SACConfig
+
 
 class PPOConfig(BaseModel):
     """Configuration for the PPO agent"""
@@ -192,7 +199,6 @@ default_mapping_config = DefaultConfig()
 default_mapping_config.algorithm = "sac"
 default_mapping_config.training.models_dir = "models/sac_pointcloud/"
 
-
 # --- SAC RNN Mapping ---
 # Create a distinct SACConfig instance with RNN set to True
 sac_rnn_config = DefaultConfig()
@@ -222,8 +228,10 @@ sparse_reward_config.training.models_dir = "models/sparse_reward_mapping/" # Dir
 # Dictionary to access configurations by name
 CONFIGS: Dict[str, DefaultConfig] = {
     "default_mapping": default_mapping_config,
-    "sac_rnn_mapping":  sac_rnn_config,
+    "sac_per_mapping": sac_per_mapping_config, # Added SAC+PER config
+    "sac_rnn_mapping": sac_rnn_config,
     "ppo_mapping": ppo_mapping_config,
     "tsac_mapping": tsac_mapping_config,
+    "tsac_per_mapping": tsac_per_mapping_config, # Added T-SAC+PER config
     "sac_sparse_reward": sparse_reward_config,
 }
