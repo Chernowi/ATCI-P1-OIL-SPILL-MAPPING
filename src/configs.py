@@ -72,10 +72,10 @@ class PPOConfig(BaseModel):
     use_state_normalization: bool = Field(False, description="Enable/disable state normalization using RunningMeanStd (operates on potentially already normalized coords)")
     use_reward_normalization: bool = Field(False, description="Enable/disable reward normalization by batch std dev")
     # --- RNN Parameters (NEW) ---
-    use_rnn: bool = Field(False, description="Whether to use RNN layers in Actor/Critic")
-    rnn_type: Literal['lstm', 'gru'] = Field('lstm', description="Type of RNN cell (Only used if use_rnn is True)")
+    use_rnn: bool = Field(True, description="Whether to use RNN layers in Actor/Critic")
+    rnn_type: Literal['lstm', 'gru'] = Field('gru', description="Type of RNN cell (Only used if use_rnn is True)")
     rnn_hidden_size: int = Field(32, description="Hidden size of RNN layers (Only used if use_rnn is True)")
-    rnn_num_layers: int = Field(1, description="Number of RNN layers (Only used if use_rnn is True)")
+    rnn_num_layers: int = Field(4, description="Number of RNN layers (Only used if use_rnn is True)")
 
 # --- Replay Buffer Config (Unchanged) ---
 class ReplayBufferConfig(BaseModel):
@@ -104,7 +104,7 @@ class TrainingConfig(BaseModel):
     # --- Early Stopping Config ---
     enable_early_stopping: bool = Field(True, description="Enable early stopping based on average reward")
     early_stopping_threshold: float = Field(25, description="Average reward threshold over the window to trigger early stopping")
-    early_stopping_window: int = Field(10, description="Number of recent episodes to average reward over for early stopping")
+    early_stopping_window: int = Field(20, description="Number of recent episodes to average reward over for early stopping")
 
 
 # --- Evaluation Config ---
@@ -182,7 +182,7 @@ class WorldConfig(BaseModel):
     uninitialized_mapper_penalty: float = Field(0.0005, description="Penalty applied if the mapper hasn't produced a valid estimate yet")
 
     mapper_config: MapperConfig = Field(default_factory=MapperConfig, description="Configuration for the mapper")
-    seeds: List[int] = Field([4,8,15,16,23,42], description="List of seeds used for environment generation during evaluation/specific resets.")
+    seeds: List[int] = Field([2313185971,8,15,16,23,42], description="List of seeds used for environment generation during evaluation/specific resets.")
 
 
 class DefaultConfig(BaseModel):
