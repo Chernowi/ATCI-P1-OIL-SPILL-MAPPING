@@ -196,7 +196,7 @@ class PrioritizedReplayBuffer:
         # After updating, find the new max priority among the leaves actually used.
         # This prevents max_priority from growing indefinitely if old high-priority samples are never resampled.
         active_leaf_indices = np.arange(self.capacity) + self.capacity - 1
-        self.tree.max_priority = np.max(self.tree.tree[active_leaf_indices[:self._current_size]])
+        self.tree.max_priority = np.max(self.tree.tree[active_leaf_indices[:self._current_size]]) if self._current_size > 0 else 1.0
 
 
     def __len__(self):
@@ -949,6 +949,7 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
             episode_reward += reward
             episode_steps += 1
             total_env_steps += 1 # Increment environment step counter
+            episode_metrics.append(current_metric) # Store metric at each step
 
             if total_env_steps >= learning_starts and total_env_steps % train_freq == 0:
                 for _ in range(gradient_steps):
@@ -995,6 +996,7 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
             writer.add_scalar('Progress/Buffer_Size', len(agent.memory), log_step)
             writer.add_scalar('Performance/Metric_AvgEp', avg_metric, log_step)
             writer.add_scalar('Performance/Metric_EndEp', world.performance_metric, log_step)
+            if world.current_seed is not None: writer.add_scalar('Environment/Current_Seed', world.current_seed, episode)
 
             if updates_made_this_episode > 0:
                 if not np.isnan(avg_losses['critic_loss']): writer.add_scalar('Loss/Critic_AvgEp', avg_losses['critic_loss'], log_step)
@@ -1006,7 +1008,8 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                  writer.add_scalar('Params/Alpha', agent.alpha, log_step)
                  if agent.use_per: writer.add_scalar('Params/PER_Beta', agent.memory.beta, log_step)
 
-            if "total" in reward_component_accumulator:
+            # Log accumulated reward components
+            if "total" in reward_component_accumulator: # Check if keys exist
                 for name, component_list in reward_component_accumulator.items():
                     if component_list: # Only log if samples exist
                          avg_component_value = np.mean(component_list)
@@ -1046,11 +1049,32 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
             save_path = os.path.join(train_config.models_dir, f"sac_ep{episode}_updates{agent.total_updates}.pt")
             agent.save_model(save_path)
 
+        # --- Early Stopping Check --- ADDED BLOCK ---
+        if train_config.enable_early_stopping and len(episode_rewards) >= train_config.early_stopping_window:
+            avg_reward_window = np.mean(episode_rewards[-train_config.early_stopping_window:])
+            if avg_reward_window >= train_config.early_stopping_threshold:
+                print(f"\nEarly stopping triggered at episode {episode}!")
+                print(f"Average reward over last {train_config.early_stopping_window} episodes ({avg_reward_window:.2f}) >= threshold ({train_config.early_stopping_threshold:.2f}).")
+                # Save final model before breaking
+                final_save_path_early = os.path.join(train_config.models_dir, f"sac_earlystop_ep{episode}_updates{agent.total_updates}.pt")
+                agent.save_model(final_save_path_early)
+                print(f"Final model saved due to early stopping: {final_save_path_early}")
+                break # Exit the training loop
+        # --- END ADDED BLOCK ---
+
+
+    # --- Modified code after the loop ---
     pbar.close()
     writer.close()
-    print(f"SAC Training finished. Total env steps: {total_env_steps}, Total updates: {agent.total_updates}")
-    final_save_path = os.path.join(train_config.models_dir, f"sac_final_ep{train_config.num_episodes}_updates{agent.total_updates}.pt")
-    agent.save_model(final_save_path)
+    # Check if loop finished normally or broke early (final save might be redundant if stopped early)
+    if episode < train_config.num_episodes: # Indicates early stopping occurred
+        print(f"SAC Training finished early at episode {episode}. Total env steps: {total_env_steps}, Total updates: {agent.total_updates}")
+    else: # Training completed all episodes
+        print(f"SAC Training finished. Total env steps: {total_env_steps}, Total updates: {agent.total_updates}")
+        final_save_path = os.path.join(train_config.models_dir, f"sac_final_ep{train_config.num_episodes}_updates{agent.total_updates}.pt")
+        # Avoid saving again if already saved by early stopping
+        if not (train_config.enable_early_stopping and 'final_save_path_early' in locals()):
+             agent.save_model(final_save_path)
 
     if run_evaluation:
          print("\nStarting evaluation after training...")

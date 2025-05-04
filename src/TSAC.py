@@ -951,11 +951,31 @@ def train_tsac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluatio
             save_path = os.path.join(train_config.models_dir, f"tsac_ep{episode}_updates{agent.total_updates}.pt")
             agent.save_model(save_path)
 
+        # --- Early Stopping Check --- ADDED BLOCK ---
+        if train_config.enable_early_stopping and len(episode_rewards) >= train_config.early_stopping_window:
+            avg_reward_window = np.mean(episode_rewards[-train_config.early_stopping_window:])
+            if avg_reward_window >= train_config.early_stopping_threshold:
+                print(f"\nEarly stopping triggered at episode {episode}!")
+                print(f"Average reward over last {train_config.early_stopping_window} episodes ({avg_reward_window:.2f}) >= threshold ({train_config.early_stopping_threshold:.2f}).")
+                # Save final model before breaking
+                final_save_path_early = os.path.join(train_config.models_dir, f"tsac_earlystop_ep{episode}_updates{agent.total_updates}.pt")
+                agent.save_model(final_save_path_early)
+                print(f"Final model saved due to early stopping: {final_save_path_early}")
+                break # Exit the training loop
+        # --- END ADDED BLOCK ---
+
+
+    # --- Modified code after the loop ---
     pbar.close()
     writer.close()
-    print(f"T-SAC Training finished. Total env steps: {total_env_steps}, Total updates: {agent.total_updates}")
-    final_save_path = os.path.join(train_config.models_dir, f"tsac_final_ep{train_config.num_episodes}_updates{agent.total_updates}.pt")
-    agent.save_model(final_save_path)
+    if episode < train_config.num_episodes: # Indicates early stopping occurred
+        print(f"T-SAC Training finished early at episode {episode}. Total env steps: {total_env_steps}, Total updates: {agent.total_updates}")
+    else: # Training completed all episodes
+        print(f"T-SAC Training finished. Total env steps: {total_env_steps}, Total updates: {agent.total_updates}")
+        final_save_path = os.path.join(train_config.models_dir, f"tsac_final_ep{train_config.num_episodes}_updates{agent.total_updates}.pt")
+        # Avoid saving again if already saved by early stopping
+        if not (train_config.enable_early_stopping and 'final_save_path_early' in locals()):
+             agent.save_model(final_save_path)
 
     if run_evaluation:
          print("\nStarting evaluation after training...")
