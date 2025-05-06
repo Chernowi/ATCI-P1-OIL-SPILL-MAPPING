@@ -31,7 +31,7 @@ def run_experiment(config_name: str, model_path: str, num_episodes: int, max_ste
 
     # --- Instantiate Agent ---
     # SAC needs sac_config, world_config, device
-    agent = SAC(config=config.sac, world_config=config.world, device=device)
+    agent = SAC(config=config.sac, world_config=config.world, buffer_config=config.replay_buffer, device=device)
 
     # --- Load Model ---
     # Use the correct model directory from config

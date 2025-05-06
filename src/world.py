@@ -1,7 +1,6 @@
 from world_objects import Object, Location, Velocity
 from configs import WorldConfig, MapperConfig, CORE_STATE_DIM, CORE_ACTION_DIM, TRAJECTORY_REWARD_DIM
 from mapper import Mapper
-# Removed calculate_iou_circles import
 import numpy as np
 import random
 import time
@@ -82,9 +81,7 @@ class World():
     def reset(self, seed: Optional[int] = None):
         """
         Resets the environment to a new initial state, potentially using a seed.
-        If `seed` is provided, it's used. Otherwise, if `seeds` is configured,
-        the next seed from the list is used. If `seeds` is empty, a random
-        seed is generated.
+        Enforces minimum distance between agent start and oil center.
         """
         self.current_step = 0
         self.done = False
@@ -105,12 +102,12 @@ class World():
         self._seed_environment(reset_seed)
         # --- End Seeding ---
 
-        # --- Generate Point Clouds ---
+        # --- Generate Oil Spill Points ---
         self.true_oil_points = []
         self.true_water_points = []
         world_w, world_h = self.world_size
 
-        # Oil points clustered
+        # Determine Oil Center (unnormalized)
         if self.world_config.randomize_oil_cluster:
             center_ranges = self.world_config.oil_center_randomization_range
             oil_center = Location(
@@ -119,46 +116,65 @@ class World():
             )
             oil_std_dev = random.uniform(*self.world_config.oil_cluster_std_dev_range)
         else:
-            oil_center = self.world_config.initial_oil_center
+            # Use Position config object directly
+            oil_center_cfg = self.world_config.initial_oil_center
+            oil_center = Location(oil_center_cfg.x, oil_center_cfg.y)
             oil_std_dev = self.world_config.initial_oil_std_dev
 
+        # Generate oil points around the center
         for _ in range(self.world_config.num_oil_points):
             px = np.random.normal(oil_center.x, oil_std_dev)
             py = np.random.normal(oil_center.y, oil_std_dev)
-            # Clamp points to be within world boundaries
-            px = max(0.0, min(world_w, px))
+            px = max(0.0, min(world_w, px)) # Clamp points
             py = max(0.0, min(world_h, py))
             self.true_oil_points.append(Location(px, py))
 
-        # Water points spread out (uniform random)
+        # Generate water points
         for _ in range(self.world_config.num_water_points):
             px = random.uniform(0, world_w)
             py = random.uniform(0, world_h)
-            # Ensure water point doesn't accidentally land exactly on an oil point (optional)
             is_on_oil = any(abs(p.x - px) < 1e-6 and abs(p.y - py) < 1e-6 for p in self.true_oil_points)
             if not is_on_oil:
                  self.true_water_points.append(Location(px, py))
 
-        # --- Initialize Agent (Unnormalized Coords) ---
-        if self.world_config.randomize_agent_initial_location:
-            ranges = self.world_config.agent_randomization_ranges
-            agent_location = Location(
-                x=random.uniform(*ranges.x_range),
-                y=random.uniform(*ranges.y_range)
-            )
-            # Ensure agent starts within bounds
-            agent_location.x = max(0.0, min(world_w, agent_location.x))
-            agent_location.y = max(0.0, min(world_h, agent_location.y))
+        # --- Initialize Agent (Unnormalized Coords) with Distance Constraint ---
+        min_dist = self.world_config.min_initial_separation_distance
+        attempts = 0
+        max_attempts = 1000 # Prevent infinite loops in edge cases
+        while attempts < max_attempts:
+            if self.world_config.randomize_agent_initial_location:
+                ranges = self.world_config.agent_randomization_ranges
+                potential_agent_loc = Location(
+                    x=random.uniform(*ranges.x_range),
+                    y=random.uniform(*ranges.y_range)
+                )
+            else:
+                # Use Position config object directly
+                loc_cfg = self.world_config.agent_initial_location
+                potential_agent_loc = Location(x=loc_cfg.x, y=loc_cfg.y)
 
-        else:
-            loc_cfg = self.world_config.agent_initial_location
-            # Clamp configured start location just in case
-            agent_location = Location(
-                 x=max(0.0, min(world_w, loc_cfg.x)),
-                 y=max(0.0, min(world_h, loc_cfg.y))
-            )
+            # Clamp potential location to world bounds first
+            potential_agent_loc.x = max(0.0, min(world_w, potential_agent_loc.x))
+            potential_agent_loc.y = max(0.0, min(world_h, potential_agent_loc.y))
 
-        self.agent_initial_location = Location(x=agent_location.x, y=agent_location.y) # Store unnormalized
+            # Check distance
+            distance = potential_agent_loc.distance_to(oil_center)
+            if distance >= min_dist:
+                agent_location = potential_agent_loc # Found a valid location
+                break # Exit the loop
+
+            attempts += 1
+            if not self.world_config.randomize_agent_initial_location:
+                 # If not randomizing and the fixed location is too close, break and warn
+                 print(f"Warning: Fixed agent initial location {potential_agent_loc} is closer ({distance:.2f}) than min required distance ({min_dist}) to oil center {oil_center}. Using fixed location anyway.")
+                 agent_location = potential_agent_loc
+                 break
+
+        else: # If loop finishes without break (max_attempts reached)
+            print(f"Warning: Could not find agent start location >= {min_dist} units away from oil center {oil_center} after {max_attempts} attempts. Using last attempt.")
+            agent_location = potential_agent_loc # Use the last generated location as fallback
+
+        self.agent_initial_location = Location(x=agent_location.x, y=agent_location.y) # Store final unnormalized location
         initial_heading = random.uniform(-math.pi, math.pi)
         agent_velocity = Velocity(
             x=self.agent_speed * math.cos(initial_heading),
@@ -169,10 +185,10 @@ class World():
         # --- Reset Mapper ---
         self.mapper.reset()
 
-        # --- Perform initial sensor reading and mapper update for the very first state ---
+        # --- Perform initial sensor reading and mapper update ---
         sensor_locs_t0, sensor_reads_t0 = self._get_sensor_readings()
         for loc, read in zip(sensor_locs_t0, sensor_reads_t0):
-             self.mapper.add_measurement(loc, read) # Add based on initial detection
+             self.mapper.add_measurement(loc, read)
         self.mapper.estimate_spill()
         self._calculate_performance_metric() # Calculate initial metric
         self.previous_performance_metric = self.performance_metric
@@ -182,11 +198,12 @@ class World():
         self._calculate_reward(sensor_reads_t0) # Pass initial readings
         self.reward = self.reward_components["total"] # Update main reward
 
-        # --- Initialize Trajectory History (uses normalized state from encode_state) ---
+        # --- Initialize Trajectory History ---
         self._initialize_trajectory_history()
 
         return self.encode_state() # Return normalized state
 
+    # ... (Rest of the methods: _get_sensor_locations, _get_sensor_readings, etc. remain unchanged) ...
 
     def _get_sensor_locations(self) -> List[Location]:
         """Calculates the world coordinates (unnormalized) of the agent's sensors."""
@@ -244,26 +261,35 @@ class World():
 
 
     def _get_basic_state_tuple_normalized(self) -> Tuple:
-        """ Encodes the instantaneous basic state observation with normalized coords. """
+        """
+        Encodes the instantaneous basic state observation with normalized coords and heading.
+        Output: (sensor1..N, agent_x_norm, agent_y_norm, agent_heading_norm)
+        """
         _, sensor_readings_bool = self._get_sensor_readings()
         sensor_readings_float = [1.0 if read else 0.0 for read in sensor_readings_bool]
+
         # Get agent's *normalized* coordinates
         agent_loc_normalized = self.agent.location.get_normalized(self.world_size)
 
-        state_list = sensor_readings_float + list(agent_loc_normalized)
+        # Get agent's heading and normalize it to [-1, 1]
+        agent_heading_rad = self.agent.get_heading() # Range [-pi, pi]
+        agent_heading_normalized = agent_heading_rad / math.pi # Range [-1, 1]
+
+        state_list = sensor_readings_float + list(agent_loc_normalized) + [agent_heading_normalized] # Add normalized heading
+
         if len(state_list) != CORE_STATE_DIM:
-             raise ValueError(f"Normalized state dimension mismatch. Expected {CORE_STATE_DIM}, got {len(state_list)}")
+            raise ValueError(f"Normalized state dimension mismatch. Expected {CORE_STATE_DIM}, got {len(state_list)}")
         return tuple(state_list)
 
     def _initialize_trajectory_history(self):
-        """Fills the initial trajectory history with the normalized initial state and reward."""
+        """Fills the initial trajectory history with the normalized initial state (incl. heading) and reward."""
         if self.agent is None:
             raise ValueError("Agent must be initialized before trajectory history.")
 
+        # Gets state including normalized heading
         initial_basic_state_normalized = self._get_basic_state_tuple_normalized()
         initial_action = 0.0
-        # Reward r1 is associated with the transition from s0
-        initial_reward = self.reward
+        initial_reward = self.reward # Reward r1
 
         initial_feature = np.concatenate([
             np.array(initial_basic_state_normalized, dtype=np.float32),
@@ -286,7 +312,7 @@ class World():
             return self.encode_state()
 
         # Store info needed *before* state changes (state s_t)
-        # Get normalized state s_t for the trajectory history
+        # Gets state s_t including normalized heading
         prev_basic_state_normalized = self._get_basic_state_tuple_normalized()
         prev_action = yaw_change_normalized # action a_t
 
@@ -312,27 +338,25 @@ class World():
         if self.world_config.terminate_out_of_bounds:
             if not (0.0 <= agent_x <= world_w and 0.0 <= agent_y <= world_h):
                 terminated_by_bounds = True
-                # Apply penalty immediately if training
-                if training:
+                if training: # Apply penalty immediately if training
                     self.reward_components["out_of_bounds_penalty"] = -self.world_config.out_of_bounds_penalty
 
-        # If terminated by bounds, skip further updates and set done flag
+        # If terminated by bounds, set done flag, calc reward, update history, and return
         if terminated_by_bounds:
-             self.done = True
-             # Calculate final reward including the penalty
-             self.reward = sum(self.reward_components.values())
-             self.reward_components["total"] = self.reward
-             # Update history with the state s_t that *led* to termination
-             current_feature_vector = np.concatenate([
-                 np.array(prev_basic_state_normalized, dtype=np.float32), # s_t (normalized)
-                 np.array([prev_action], dtype=np.float32),              # a_t
-                 np.array([self.reward], dtype=np.float32)               # r_{t+1} (includes penalty)
-             ])
-             self._trajectory_history.append(current_feature_vector)
-             return self.encode_state() # Return state s_{t+1} (which is OOB)
+            self.done = True
+            self.reward = sum(self.reward_components.values()) # Includes penalty
+            self.reward_components["total"] = self.reward
+            # Update history with s_t (incl heading), a_t, r_{t+1}
+            current_feature_vector = np.concatenate([
+                np.array(prev_basic_state_normalized, dtype=np.float32), # s_t (normalized, incl heading)
+                np.array([prev_action], dtype=np.float32),              # a_t
+                np.array([self.reward], dtype=np.float32)               # r_{t+1}
+            ])
+            self._trajectory_history.append(current_feature_vector)
+            return self.encode_state() # Return state s_{t+1} (OOB state)
+
 
         # --- Continue if not terminated by bounds ---
-
         # 4. Update Mapper with measurements taken at time t
         for loc, read in zip(sensor_locs_t, sensor_reads_t):
             self.mapper.add_measurement(loc, read)
@@ -342,9 +366,9 @@ class World():
         self._calculate_performance_metric()
 
         # 6. Calculate reward components r_{t+1} based on state at t+1 and change from t
-        if training:
+        if training: # Only calculate reward details if training
             self._calculate_reward(sensor_reads_t) # Pass sensor reads from time t
-        else:
+        else: # If not training, just set reward to 0 (or keep previous)
             self.reward_components = {k: 0.0 for k in self.reward_components}
             self.reward = 0.0
 
@@ -355,7 +379,7 @@ class World():
         terminated_by_steps = terminal_step # Reached max steps for episode
 
         # Update done flag
-        self.done = terminated_by_success or terminated_by_steps # Already handled bounds termination
+        self.done = terminated_by_success or terminated_by_steps # Bounds already handled
 
         # Apply success bonus if applicable (and training)
         self.reward_components["success_bonus"] = 0.0
@@ -367,9 +391,9 @@ class World():
         self.reward = sum(self.reward_components.values())
         self.reward_components["total"] = self.reward
 
-        # 8. Update trajectory history with [s_t (normalized), a_t, r_{t+1}]
+        # 8. Update trajectory history with [s_t (normalized, incl heading), a_t, r_{t+1}]
         current_feature_vector = np.concatenate([
-            np.array(prev_basic_state_normalized, dtype=np.float32), # s_t (normalized)
+            np.array(prev_basic_state_normalized, dtype=np.float32), # s_t (normalized, incl heading)
             np.array([prev_action], dtype=np.float32),              # a_t
             np.array([self.reward], dtype=np.float32)               # r_{t+1}
         ])
@@ -381,7 +405,7 @@ class World():
         self.previous_performance_metric = self.performance_metric
         self.last_sensor_reads = sensor_reads_t
 
-        # Return the state dict representing s_{t+1} (normalized)
+        # Return the state dict representing s_{t+1} (normalized, incl heading)
         return self.encode_state()
 
     def _calculate_reward(self, current_sensor_readings: List[bool]):
@@ -426,30 +450,30 @@ class World():
         """
         Encodes the full state representation needed by the RL agent.
         Returns a dictionary containing:
-            - 'basic_state': Tuple (sensor1..N, agent_x_norm, agent_y_norm) at current time t+1.
+            - 'basic_state': Tuple (sensor1..N, agent_x_norm, agent_y_norm, agent_heading_norm) at current time t+1.
             - 'full_trajectory': Numpy array (traj_length, feature_dim) where the
                                  state component within each feature vector contains
-                                 *normalized* coordinates.
+                                 *normalized* coordinates and heading.
         """
-        # 1. Get the basic state tuple with normalized coordinates for the *current* time t+1
-        basic_state_t_plus_1_normalized = self._get_basic_state_tuple_normalized()
+        # 1. Get the basic state tuple with normalized coords and heading for the *current* time t+1
+        basic_state_t_plus_1_normalized = self._get_basic_state_tuple_normalized() # Now includes heading
 
-        # 2. Get the trajectory history (which contains normalized states already)
+        # 2. Get the trajectory history (which contains normalized states incl. heading)
         full_trajectory_normalized = np.array(self._trajectory_history, dtype=np.float32)
 
         # Validation checks
         if full_trajectory_normalized.shape != (self.trajectory_length, self.feature_dim):
              # This indicates a problem during history update, attempt recovery
              print(f"CRITICAL WARNING: Encoded trajectory shape mismatch. Got {full_trajectory_normalized.shape}, expected {(self.trajectory_length, self.feature_dim)}. Reinitializing history.")
-             self._initialize_trajectory_history() # Reinitialize with the CURRENT state
+             self._initialize_trajectory_history() # Reinitialize with the CURRENT state (incl heading)
              full_trajectory_normalized = np.array(self._trajectory_history, dtype=np.float32)
              if full_trajectory_normalized.shape != (self.trajectory_length, self.feature_dim):
                   raise ValueError(f"Failed to recover trajectory history shape after mismatch.")
 
         if np.isnan(basic_state_t_plus_1_normalized).any() or np.isnan(full_trajectory_normalized).any():
-             print(f"Warning: NaN detected in encode_state. Step: {self.current_step}")
              # Consider how to handle NaNs if they persist - maybe return previous state?
              # For now, just print warning. Algorithms might handle NaNs via skipping updates.
+             print(f"Warning: NaN detected in encode_state. Step: {self.current_step}")
              basic_state_t_plus_1_normalized = tuple(np.nan_to_num(list(basic_state_t_plus_1_normalized), nan=0.0))
              full_trajectory_normalized = np.nan_to_num(full_trajectory_normalized, nan=0.0)
 
@@ -458,3 +482,4 @@ class World():
             "basic_state": basic_state_t_plus_1_normalized,
             "full_trajectory": full_trajectory_normalized
         }
+        

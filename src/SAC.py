@@ -9,6 +9,7 @@ import random
 import time
 from collections import deque
 from tqdm import tqdm
+import math # Added for potential use later, though not directly needed in this file now
 
 # Local imports
 from world import World # Now the mapping world
@@ -98,7 +99,7 @@ class PrioritizedReplayBuffer:
         self.config = config
         self.buffer_config = buffer_config
         self.trajectory_length = world_config.trajectory_length
-        self.feature_dim = world_config.trajectory_feature_dim
+        self.feature_dim = world_config.trajectory_feature_dim # Includes heading
         self.alpha = config.per_alpha
         self.beta_start = config.per_beta_start
         self.beta = self.beta_start
@@ -110,8 +111,8 @@ class PrioritizedReplayBuffer:
 
     def push(self, state, action, reward, next_state, done):
         """ Add a new experience with max priority. """
-        trajectory = state['full_trajectory']
-        next_trajectory = next_state['full_trajectory']
+        trajectory = state['full_trajectory'] # Includes heading
+        next_trajectory = next_state['full_trajectory'] # Includes heading
         if isinstance(action, (np.ndarray, list)): action = action[0]
         if isinstance(reward, (np.ndarray)): reward = reward.item()
 
@@ -167,10 +168,10 @@ class PrioritizedReplayBuffer:
             sampled_experiences = [self.memory[di] for di in data_indices]
             trajectory, action, reward, next_trajectory, done = zip(*sampled_experiences)
 
-            batch_data['state'] = np.array(trajectory, dtype=np.float32)
+            batch_data['state'] = np.array(trajectory, dtype=np.float32) # Includes heading
             batch_data['action'] = np.array(action, dtype=np.float32).reshape(-1, 1)
             batch_data['reward'] = np.array(reward, dtype=np.float32)
-            batch_data['next_state'] = np.array(next_trajectory, dtype=np.float32)
+            batch_data['next_state'] = np.array(next_trajectory, dtype=np.float32) # Includes heading
             batch_data['done'] = np.array(done, dtype=np.float32)
 
             # Calculate Importance Sampling weights
@@ -210,12 +211,12 @@ class ReplayBuffer:
         self.buffer = deque(maxlen=config.capacity)
         self.config = config
         self.trajectory_length = world_config.trajectory_length
-        self.feature_dim = world_config.trajectory_feature_dim # Includes state+action+reward
+        self.feature_dim = world_config.trajectory_feature_dim # Includes state+action+reward (state includes heading)
 
     def push(self, state, action, reward, next_state, done):
         """ Add a new experience to memory. """
-        trajectory = state['full_trajectory'] # Shape (N, feat_dim) - state is normalized
-        next_trajectory = next_state['full_trajectory'] # Shape (N, feat_dim) - state is normalized
+        trajectory = state['full_trajectory'] # Shape (N, feat_dim) - state is normalized (incl heading)
+        next_trajectory = next_state['full_trajectory'] # Shape (N, feat_dim) - state is normalized (incl heading)
 
         if isinstance(action, (np.ndarray, list)): action = action[0]
         if isinstance(reward, (np.ndarray)): reward = reward.item()
@@ -243,7 +244,7 @@ class ReplayBuffer:
             print(f"Warning: ReplayBuffer sampling failed. len(buffer)={len(self.buffer)}, batch_size={batch_size}")
             return None
 
-        # state/next_state are full trajectories (batch, N, feat_dim) - state part is normalized
+        # state/next_state are full trajectories (batch, N, feat_dim) - state part is normalized (incl heading)
         trajectory, action, reward, next_trajectory, done = zip(*batch)
         batch_data = {}
         try:
@@ -267,7 +268,7 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
-# --- Actor and Critic Classes (Unchanged) ---
+# --- Actor and Critic Classes (Unchanged structure, but input dim handled by config) ---
 class Actor(nn.Module):
     """Policy network (Actor) for SAC, optionally with RNN."""
     def __init__(self, config: SACConfig, world_config: WorldConfig):
@@ -275,7 +276,7 @@ class Actor(nn.Module):
         self.config = config
         self.world_config = world_config
         self.use_rnn = config.use_rnn
-        # Input state dim (already potentially normalized)
+        # Input state dim (already potentially normalized, now includes heading)
         self.state_dim = config.state_dim
         self.action_dim = config.action_dim
         self.trajectory_length = world_config.trajectory_length
@@ -283,7 +284,7 @@ class Actor(nn.Module):
         if self.use_rnn:
             self.rnn_hidden_size = config.rnn_hidden_size
             self.rnn_num_layers = config.rnn_num_layers
-            # RNN processes the CORE_STATE_DIM features (normalized)
+            # RNN processes the CORE_STATE_DIM features (normalized, incl heading)
             rnn_input_dim = self.state_dim
             if config.rnn_type == 'lstm':
                 self.rnn = nn.LSTM(input_size=rnn_input_dim, hidden_size=config.rnn_hidden_size,
@@ -295,7 +296,7 @@ class Actor(nn.Module):
                 raise ValueError(f"Unsupported RNN type: {config.rnn_type}")
             mlp_input_dim = config.rnn_hidden_size
         else:
-            # MLP uses only the last normalized basic state
+            # MLP uses only the last normalized basic state (incl heading)
             mlp_input_dim = self.state_dim
             self.rnn = None
 
@@ -317,17 +318,17 @@ class Actor(nn.Module):
         """Forward pass through the network.
            Expects pre-normalized basic state(s).
            network_input shape:
-             - RNN: (batch, seq_len, state_dim) - normalized basic state sequence
-             - MLP: (batch, state_dim) - normalized last basic state
+             - RNN: (batch, seq_len, state_dim) - normalized basic state sequence (incl heading)
+             - MLP: (batch, state_dim) - normalized last basic state (incl heading)
         """
         next_hidden_state = None
         if self.use_rnn:
-            # RNN processing (input is already normalized basic state sequence)
+            # RNN processing (input is already normalized basic state sequence incl heading)
             rnn_output, next_hidden_state = self.rnn(network_input, hidden_state)
             # Use the output corresponding to the last time step
             mlp_input = rnn_output[:, -1, :] # Shape: (batch, rnn_hidden_size)
         else:
-            # MLP input is the normalized last basic state
+            # MLP input is the normalized last basic state (incl heading)
             mlp_input = network_input # Shape: (batch, state_dim)
 
         x = mlp_input
@@ -376,7 +377,7 @@ class Critic(nn.Module):
         self.config = config
         self.world_config = world_config
         self.use_rnn = config.use_rnn
-        # Input state dim (already potentially normalized)
+        # Input state dim (already potentially normalized, includes heading)
         self.state_dim = config.state_dim
         self.action_dim = config.action_dim
         self.trajectory_length = world_config.trajectory_length
@@ -384,7 +385,7 @@ class Critic(nn.Module):
         if self.use_rnn:
             self.rnn_hidden_size = config.rnn_hidden_size
             self.rnn_num_layers = config.rnn_num_layers
-            # RNN processes the CORE_STATE_DIM features (normalized)
+            # RNN processes the CORE_STATE_DIM features (normalized, incl heading)
             rnn_input_dim = self.state_dim
             rnn_cell = nn.LSTM if config.rnn_type == 'lstm' else nn.GRU
 
@@ -394,7 +395,7 @@ class Critic(nn.Module):
                                   num_layers=config.rnn_num_layers, batch_first=True)
             mlp_input_dim = config.rnn_hidden_size + self.action_dim # MLP takes final RNN state + action
         else:
-            # MLP uses only the normalized last basic state + action
+            # MLP uses only the normalized last basic state (incl heading) + action
             mlp_input_dim = self.state_dim + self.action_dim
             self.rnn1, self.rnn2 = None, None
 
@@ -422,8 +423,8 @@ class Critic(nn.Module):
         """Forward pass returning both Q-values.
            Expects pre-normalized basic state(s).
            network_input shape:
-             - RNN: (batch, seq_len, state_dim) - normalized basic state sequence
-             - MLP: (batch, state_dim) - normalized last basic state
+             - RNN: (batch, seq_len, state_dim) - normalized basic state sequence (incl heading)
+             - MLP: (batch, state_dim) - normalized last basic state (incl heading)
            action shape: (batch, action_dim)
         """
         next_hidden_state = None
@@ -432,7 +433,7 @@ class Critic(nn.Module):
             if isinstance(hidden_state, tuple) and len(hidden_state) == 2:
                  h1_in, h2_in = hidden_state
 
-            # RNN processing (input is already normalized basic state sequence)
+            # RNN processing (input is already normalized basic state sequence incl heading)
             rnn_out1, next_h1 = self.rnn1(network_input, h1_in)
             rnn_out2, next_h2 = self.rnn2(network_input, h2_in)
             next_hidden_state = (next_h1, next_h2)
@@ -441,7 +442,7 @@ class Critic(nn.Module):
             mlp_input1 = torch.cat([rnn_out1[:, -1, :], action], dim=1)
             mlp_input2 = torch.cat([rnn_out2[:, -1, :], action], dim=1)
         else:
-            # Use normalized last basic state and concatenate with action
+            # Use normalized last basic state (incl heading) and concatenate with action
             # network_input is shape (batch, state_dim) here
             mlp_input1 = torch.cat([network_input, action], dim=1)
             mlp_input2 = torch.cat([network_input, action], dim=1)
@@ -506,7 +507,7 @@ class SAC:
         self.auto_tune_alpha = config.auto_tune_alpha
         self.use_rnn = config.use_rnn
         self.trajectory_length = world_config.trajectory_length
-        self.state_dim = config.state_dim # Dimension of the (potentially normalized) state input
+        self.state_dim = config.state_dim # Dimension of the (potentially normalized) basic state input (now includes heading)
         self.action_dim = config.action_dim
         self.use_state_normalization = config.use_state_normalization
         self.use_reward_normalization = config.use_reward_normalization
@@ -522,8 +523,9 @@ class SAC:
         # --- Conditional State Normalization ---
         self.state_normalizer = None
         if self.use_state_normalization:
+             # Initialize with the new state_dim
             self.state_normalizer = RunningMeanStd(shape=(self.state_dim,), device=self.device)
-            print(f"SAC Agent state normalization ENABLED for dim: {self.state_dim}")
+            print(f"SAC Agent state normalization ENABLED for dim: {self.state_dim} (incl. heading)") # Updated print
         else:
             print(f"SAC Agent state normalization DISABLED.")
 
@@ -558,15 +560,20 @@ class SAC:
         self.total_updates = 0 # Track updates for beta annealing if using PER
 
     def select_action(self, state: dict, actor_hidden_state: Optional[Tuple] = None, evaluate: bool = False) -> Tuple[float, Optional[Tuple]]:
-        """Select action (normalized yaw change [-1, 1]) based on normalized state (if enabled)."""
-        state_trajectory = state['full_trajectory']
+        """Select action (normalized yaw change [-1, 1]) based on normalized state (if enabled).
+           'evaluate=True' means deterministic action (mean), 'evaluate=False' means stochastic action (sample).
+        """
+        state_trajectory = state['full_trajectory'] # Includes normalized heading
         state_tensor_full = torch.FloatTensor(state_trajectory).to(self.device).unsqueeze(0) # (1, N, feat_dim)
 
         with torch.no_grad():
+            # Extract the basic state part (sensors + coords + heading)
             state_part_normalized = state_tensor_full[:, :, :self.state_dim] # (1, N, state_dim)
 
-            if self.use_rnn: raw_network_input = state_part_normalized
-            else: raw_network_input = state_part_normalized[:, -1, :]
+            if self.use_rnn:
+                raw_network_input = state_part_normalized # Use full sequence
+            else:
+                raw_network_input = state_part_normalized[:, -1, :] # Use last state (incl heading)
 
             if self.use_state_normalization and self.state_normalizer:
                 self.state_normalizer.eval()
@@ -577,9 +584,11 @@ class SAC:
 
             self.actor.eval()
             if evaluate:
+                # Get deterministic action (tanh of mean)
                 _, _, action_mean_squashed, next_actor_hidden_state = self.actor.sample(network_input_processed, actor_hidden_state)
                 action_normalized = action_mean_squashed
             else:
+                # Sample stochastic action
                 action_normalized, _, _, next_actor_hidden_state = self.actor.sample(network_input_processed, actor_hidden_state)
             self.actor.train()
 
@@ -602,10 +611,10 @@ class SAC:
             weights_tensor = torch.ones(batch_size, 1, device=self.device) # Weights are 1
 
         # Extract data from dictionary
-        state_batch = batch_data['state']
+        state_batch = batch_data['state'] # Includes heading
         action_batch_normalized = batch_data['action']
         reward_batch = batch_data['reward']
-        next_state_batch = batch_data['next_state']
+        next_state_batch = batch_data['next_state'] # Includes heading
         done_batch = batch_data['done']
 
         state_batch_tensor = torch.FloatTensor(state_batch).to(self.device)
@@ -623,15 +632,17 @@ class SAC:
             reward_batch_tensor = reward_batch_tensor_raw
 
         # --- State Processing and Normalization ---
+        # Extract basic state part (incl heading)
         state_part_normalized = state_batch_tensor[:, :, :self.state_dim]
         next_state_part_normalized = next_state_batch_tensor[:, :, :self.state_dim]
 
         if self.use_state_normalization and self.state_normalizer:
+            # Update normalizer with all basic states (incl heading) from the batch
             self.state_normalizer.update(state_part_normalized.reshape(-1, self.state_dim))
 
         if self.use_rnn:
-            raw_current_input = state_part_normalized
-            raw_next_input = next_state_part_normalized
+            raw_current_input = state_part_normalized # (batch, N, state_dim)
+            raw_next_input = next_state_part_normalized # (batch, N, state_dim)
             if self.use_state_normalization and self.state_normalizer:
                  batch, seq_len, _ = raw_current_input.shape
                  current_network_input = self.state_normalizer.normalize(raw_current_input.reshape(-1, self.state_dim)).reshape(batch, seq_len, self.state_dim)
@@ -639,8 +650,8 @@ class SAC:
                  next_network_input = self.state_normalizer.normalize(raw_next_input.reshape(-1, self.state_dim)).reshape(batch_next, seq_len_next, self.state_dim)
             else: current_network_input, next_network_input = raw_current_input, raw_next_input
         else:
-            raw_current_input = state_part_normalized[:, -1, :]
-            raw_next_input = next_state_part_normalized[:, -1, :]
+            raw_current_input = state_part_normalized[:, -1, :] # (batch, state_dim) - last state incl heading
+            raw_next_input = next_state_part_normalized[:, -1, :] # (batch, state_dim) - last state incl heading
             if self.use_state_normalization and self.state_normalizer:
                  current_network_input = self.state_normalizer.normalize(raw_current_input)
                  next_network_input = self.state_normalizer.normalize(raw_next_input)
@@ -767,7 +778,15 @@ class SAC:
             print(f"Warning: Loaded model STATE normalization setting ({loaded_use_state_norm}) differs from current config ({self.use_state_normalization}). Using current config setting.")
         if self.use_state_normalization and self.state_normalizer:
             if 'state_normalizer_state_dict' in checkpoint:
-                try: self.state_normalizer.load_state_dict(checkpoint['state_normalizer_state_dict']); print("Loaded state normalizer statistics.")
+                try:
+                    # Check shapes before loading
+                    loaded_mean_shape = checkpoint['state_normalizer_state_dict']['mean'].shape
+                    if loaded_mean_shape != self.state_normalizer.mean.shape:
+                         print(f"Warning: Mismatch in loaded state normalizer shape ({loaded_mean_shape}) and current ({self.state_normalizer.mean.shape}). Reinitializing normalizer.")
+                         # Optionally re-initialize: self.state_normalizer = RunningMeanStd(shape=(self.state_dim,), device=self.device)
+                    else:
+                         self.state_normalizer.load_state_dict(checkpoint['state_normalizer_state_dict'])
+                         print(f"Loaded state normalizer statistics (dim={self.state_dim}).") # Updated print
                 except Exception as e: print(f"Warning: Failed to load state normalizer stats: {e}. Using initial values.")
             else: print("Warning: State normalizer stats not found in checkpoint, but normalization is enabled.")
 
@@ -916,7 +935,7 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
     total_env_steps = 0 # Separate counter for env steps
 
     for episode in pbar:
-        state = world.reset()
+        state = world.reset() # state dict including basic_state and full_trajectory
         episode_reward = 0
         episode_steps = 0
         actor_hidden_state = agent.actor.get_initial_hidden_state(batch_size=1, device=device) if agent.use_rnn else None
@@ -927,10 +946,11 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
 
         for step_in_episode in range(train_config.max_steps):
             action_normalized, next_actor_hidden_state = agent.select_action(
-                state, actor_hidden_state=actor_hidden_state, evaluate=False
+                state, actor_hidden_state=actor_hidden_state, evaluate=False # Always sample during training
             )
 
             step_start_time = time.time()
+            # Reward calculation happens inside world.step regardless of training flag
             next_state = world.step(action_normalized, training=True, terminal_step=(step_in_episode == train_config.max_steps - 1))
             timing_metrics['env_step_time'].append(time.time() - step_start_time)
 
@@ -1020,9 +1040,16 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                 writer.add_scalar('Stats/Normalizer_Count', agent.state_normalizer.count.item(), log_step)
                 writer.add_scalar('Stats/Normalizer_Mean_Sensor0', agent.state_normalizer.mean[0].item(), log_step)
                 writer.add_scalar('Stats/Normalizer_Std_Sensor0', torch.sqrt(agent.state_normalizer.var[0].clamp(min=1e-8)).item(), log_step)
-                if agent.state_dim > 5:
-                    writer.add_scalar('Stats/Normalizer_Mean_AgentXNorm', agent.state_normalizer.mean[5].item(), log_step)
-                    writer.add_scalar('Stats/Normalizer_Std_AgentXNorm', torch.sqrt(agent.state_normalizer.var[5].clamp(min=1e-8)).item(), log_step)
+                if agent.state_dim > 5: # Log X coord norm
+                     writer.add_scalar('Stats/Normalizer_Mean_AgentXNorm', agent.state_normalizer.mean[5].item(), log_step)
+                     writer.add_scalar('Stats/Normalizer_Std_AgentXNorm', torch.sqrt(agent.state_normalizer.var[5].clamp(min=1e-8)).item(), log_step)
+                if agent.state_dim > 6: # Log Y coord norm
+                     writer.add_scalar('Stats/Normalizer_Mean_AgentYNorm', agent.state_normalizer.mean[6].item(), log_step)
+                     writer.add_scalar('Stats/Normalizer_Std_AgentYNorm', torch.sqrt(agent.state_normalizer.var[6].clamp(min=1e-8)).item(), log_step)
+                if agent.state_dim > 7: # Log Heading norm
+                     writer.add_scalar('Stats/Normalizer_Mean_AgentHeadingNorm', agent.state_normalizer.mean[7].item(), log_step)
+                     writer.add_scalar('Stats/Normalizer_Std_AgentHeadingNorm', torch.sqrt(agent.state_normalizer.var[7].clamp(min=1e-8)).item(), log_step)
+
 
             lookback = min(100, len(episode_rewards))
             avg_reward_100 = np.mean(episode_rewards[-lookback:]) if episode_rewards else 0
@@ -1090,6 +1117,8 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
     eval_config = config.evaluation
     world_config = config.world
     vis_config = config.visualization
+    # Use stochastic policy during evaluation?
+    use_stochastic_policy = eval_config.use_stochastic_policy_eval
 
     vis_available = False
     visualize_world, reset_trajectories, save_gif = None, None, None
@@ -1117,7 +1146,8 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
     if agent.use_state_normalization and agent.state_normalizer:
         agent.state_normalizer.eval()
 
-    print(f"\nRunning SAC Evaluation for {eval_config.num_episodes} episodes...")
+    policy_mode = "Stochastic" if use_stochastic_policy else "Deterministic"
+    print(f"\nRunning SAC Evaluation ({policy_mode} Policy) for {eval_config.num_episodes} episodes...")
     eval_seeds = world_config.seeds
     if len(eval_seeds) != eval_config.num_episodes:
          print(f"Warning: Number of evaluation seeds ({len(eval_seeds)}) doesn't match num_episodes ({eval_config.num_episodes}). Using first {eval_config.num_episodes} seeds or generating if needed.")
@@ -1130,7 +1160,7 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
 
     for episode in range(eval_config.num_episodes):
         seed_to_use = eval_seeds[episode] if eval_seeds else None
-        state = world.reset(seed=seed_to_use)
+        state = world.reset(seed=seed_to_use) # state dict
         episode_reward = 0
         episode_frames = []
         actor_hidden_state = agent.actor.get_initial_hidden_state(batch_size=1, device=agent.device) if agent.use_rnn else None
@@ -1140,24 +1170,26 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
             os.makedirs(vis_config.save_dir, exist_ok=True)
             if reset_trajectories: reset_trajectories()
             try:
-                fname = f"sac_eval_ep{episode+1}_frame_000_initial.png"
+                fname = f"sac_{policy_mode.lower()}_eval_ep{episode+1}_frame_000_initial.png"
                 initial_frame_file = visualize_world(world, vis_config=vis_config, filename=fname)
                 if initial_frame_file and os.path.exists(initial_frame_file): episode_frames.append(initial_frame_file)
             except Exception as e: print(f"Warn: Vis failed init state ep {episode+1}. E: {e}")
 
         for step in range(eval_config.max_steps):
+            # Select action: evaluate=True -> deterministic (mean), evaluate=False -> stochastic (sample)
             action_normalized, next_actor_hidden_state = agent.select_action(
-                state, actor_hidden_state=actor_hidden_state, evaluate=True
+                state, actor_hidden_state=actor_hidden_state, evaluate=(not use_stochastic_policy)
             )
+            # Step the world using training=False BUT reward calculation is always done inside world.step
             next_state = world.step(action_normalized, training=False, terminal_step=(step == eval_config.max_steps - 1))
-            reward = world.reward
+            reward = world.reward # Get the reward calculated
             done = world.done
             current_metric = world.performance_metric
             episode_metrics_current.append(current_metric)
 
             if eval_config.render and vis_available:
                 try:
-                    fname = f"sac_eval_ep{episode+1}_frame_{step+1:03d}.png"
+                    fname = f"sac_{policy_mode.lower()}_eval_ep{episode+1}_frame_{step+1:03d}.png"
                     frame_file = visualize_world(world, vis_config=vis_config, filename=fname)
                     if frame_file and os.path.exists(frame_file): episode_frames.append(frame_file)
                 except Exception as e: print(f"Warn: Vis failed step {step+1} ep {episode+1}. E: {e}")
@@ -1174,12 +1206,12 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
         success = final_metric >= world_config.success_metric_threshold
         if success: success_count += 1
         status = "Success!" if success else "Failure."
-        print(f"  Ep {episode+1}/{eval_config.num_episodes} (Seed:{world.current_seed}): Steps={world.current_step}, Terminated={world.done}, Final Metric: {final_metric:.3f}. {status}")
+        print(f"  Ep {episode+1}/{eval_config.num_episodes} (Seed:{world.current_seed}): Steps={world.current_step}, Terminated={world.done}, Final Metric: {final_metric:.3f}, Accum Reward: {episode_reward:.2f}. {status}")
 
         if eval_config.render and vis_available and episode_frames and save_gif:
-            gif_filename = f"sac_mapping_eval_episode_{episode+1}_seed{world.current_seed}.gif"
+            gif_filename = f"sac_mapping_eval_{policy_mode.lower()}_episode_{episode+1}_seed{world.current_seed}.gif"
             try:
-                print(f"  Saving GIF for SAC episode {episode+1} with {len(episode_frames)} frames...")
+                print(f"  Saving GIF for SAC episode {episode+1} ({policy_mode}) with {len(episode_frames)} frames...")
                 gif_path = save_gif(output_filename=gif_filename, vis_config=vis_config, frame_paths=episode_frames, delete_frames=vis_config.delete_frames_after_gif)
                 if gif_path: all_episode_gif_paths.append(gif_path)
             except Exception as e: print(f"  Warn: Failed GIF save ep {episode+1}. E: {e}")
@@ -1196,14 +1228,14 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
     std_eval_metric = np.std(eval_metrics) if eval_metrics else 0.0
     success_rate = success_count / eval_config.num_episodes if eval_config.num_episodes > 0 else 0.0
 
-    print("\n--- SAC Evaluation Summary ---")
+    print(f"\n--- SAC Evaluation Summary ({policy_mode} Policy) ---")
     print(f"Episodes: {eval_config.num_episodes}")
     print(f"Average Final Metric (Point Inclusion): {avg_eval_metric:.3f} +/- {std_eval_metric:.3f}")
     print(f"Success Rate (Metric >= {world_config.success_metric_threshold:.2f}): {success_rate:.2%} ({success_count}/{eval_config.num_episodes})")
-    print(f"Average Episode Reward: {avg_eval_reward:.3f} +/- {std_eval_reward:.3f}")
+    print(f"Average Accumulated Episode Reward: {avg_eval_reward:.3f} +/- {std_eval_reward:.3f}")
     if eval_config.render and vis_available and all_episode_gif_paths: print(f"GIFs saved to: '{os.path.abspath(vis_config.save_dir)}'")
     elif eval_config.render and not vis_available: print("Rendering was enabled but visualization libraries were not found.")
     elif not eval_config.render: print("Rendering disabled.")
-    print("--- End SAC Evaluation ---\n")
+    print(f"--- End SAC Evaluation ({policy_mode} Policy) ---\n")
 
     return eval_rewards, success_rate, avg_eval_metric

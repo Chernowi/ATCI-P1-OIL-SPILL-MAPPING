@@ -77,7 +77,7 @@ class PrioritizedReplayBuffer:
         self.config = config # Store TSACConfig
         self.buffer_config = buffer_config
         self.trajectory_length = world_config.trajectory_length
-        self.feature_dim = world_config.trajectory_feature_dim
+        self.feature_dim = world_config.trajectory_feature_dim # Includes heading
         self.alpha = config.per_alpha
         self.beta_start = config.per_beta_start
         self.beta = self.beta_start
@@ -88,8 +88,8 @@ class PrioritizedReplayBuffer:
         self._current_size = 0
 
     def push(self, state, action, reward, next_state, done):
-        trajectory = state['full_trajectory']
-        next_trajectory = next_state['full_trajectory']
+        trajectory = state['full_trajectory'] # Includes heading
+        next_trajectory = next_state['full_trajectory'] # Includes heading
         if isinstance(action, (np.ndarray, list)): action = action[0]
         if isinstance(reward, (np.ndarray)): reward = reward.item()
 
@@ -133,10 +133,10 @@ class PrioritizedReplayBuffer:
             sampled_experiences = [self.memory[di] for di in data_indices]
             trajectory, action, reward, next_trajectory, done = zip(*sampled_experiences)
 
-            batch_data['state'] = np.array(trajectory, dtype=np.float32)
+            batch_data['state'] = np.array(trajectory, dtype=np.float32) # Includes heading
             batch_data['action'] = np.array(action, dtype=np.float32).reshape(-1, 1)
             batch_data['reward'] = np.array(reward, dtype=np.float32)
-            batch_data['next_state'] = np.array(next_trajectory, dtype=np.float32)
+            batch_data['next_state'] = np.array(next_trajectory, dtype=np.float32) # Includes heading
             batch_data['done'] = np.array(done, dtype=np.float32)
 
             sampling_probabilities = priorities / self.tree.total()
@@ -171,10 +171,10 @@ class ReplayBuffer:
         self.buffer = deque(maxlen=config.capacity)
         self.config = config
         self.trajectory_length = world_config.trajectory_length
-        self.feature_dim = world_config.trajectory_feature_dim # normalized_state + action + reward
+        self.feature_dim = world_config.trajectory_feature_dim # normalized_state (incl heading) + action + reward
 
     def push(self, state, action, reward, next_state, done):
-        # state/next_state dicts contain 'full_trajectory' with normalized coords
+        # state/next_state dicts contain 'full_trajectory' with normalized coords and heading
         trajectory = state['full_trajectory'] # (N, feat_dim)
         next_trajectory = next_state['full_trajectory'] # (N, feat_dim)
         if isinstance(action, (np.ndarray, list)): action = action[0]
@@ -191,7 +191,7 @@ class ReplayBuffer:
         try: batch = random.sample(self.buffer, batch_size)
         except ValueError: return None
 
-        # Trajectories contain normalized states
+        # Trajectories contain normalized states (incl heading)
         trajectory, action, reward, next_trajectory, done = zip(*batch)
         batch_data = {}
         try:
@@ -231,7 +231,7 @@ class Actor(nn.Module):
         self.config = config
         self.world_config = world_config
         self.use_layer_norm = config.use_layer_norm_actor
-        self.state_dim = config.state_dim # Dim of normalized state
+        self.state_dim = config.state_dim # Dim of normalized state (incl heading)
         self.action_dim = config.action_dim
 
         self.layers = nn.ModuleList()
@@ -253,7 +253,7 @@ class Actor(nn.Module):
         self.log_std_max = config.log_std_max
 
     def forward(self, network_input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass using potentially re-normalized last basic state."""
+        """Forward pass using potentially re-normalized last basic state (incl heading)."""
         x = network_input
         for layer in self.layers:
             x = layer(x)
@@ -289,7 +289,7 @@ class TransformerCritic(nn.Module):
         super(TransformerCritic, self).__init__()
         self.config = config
         self.world_config = world_config
-        self.state_dim = config.state_dim # Dim of normalized state
+        self.state_dim = config.state_dim # Dim of normalized state (incl heading)
         self.action_dim = config.action_dim
         self.embedding_dim = config.embedding_dim
         self.sequence_length = world_config.trajectory_length
@@ -321,7 +321,7 @@ class TransformerCritic(nn.Module):
 
     def forward(self, initial_state_input: torch.Tensor, action_sequence: torch.Tensor) -> torch.Tensor:
         """Forward pass.
-           initial_state_input: (batch, state_dim) - potentially re-normalized
+           initial_state_input: (batch, state_dim) - potentially re-normalized (incl heading)
            action_sequence: (batch, n, action_dim) where n <= N (raw actions a1..aN)
            Returns Q-predictions corresponding to actions: (batch, n, 1)
         """
@@ -361,7 +361,7 @@ class TSAC:
         self.alpha = config.alpha
         self.auto_tune_alpha = config.auto_tune_alpha
         self.sequence_length = world_config.trajectory_length
-        self.state_dim = config.state_dim
+        self.state_dim = config.state_dim # Includes heading
         self.action_dim = config.action_dim
         self.use_state_normalization = config.use_state_normalization
         self.use_per = config.use_per # Store PER flag
@@ -375,8 +375,9 @@ class TSAC:
         # --- Conditional Agent-Level Normalization ---
         self.state_normalizer = None
         if self.use_state_normalization:
+             # Use the updated state_dim
             self.state_normalizer = RunningMeanStd(shape=(self.state_dim,), device=self.device)
-            print(f"T-SAC Agent state normalization ENABLED for dim: {self.state_dim}")
+            print(f"T-SAC Agent state normalization ENABLED for dim: {self.state_dim} (incl. heading)") # Updated print
         else: print(f"T-SAC Agent state normalization DISABLED.")
 
         # --- Network Instantiation ---
@@ -418,10 +419,13 @@ class TSAC:
         self.total_updates = 0 # Track updates for beta annealing
 
     def select_action(self, state: dict, evaluate: bool = False) -> float:
-        """Select action (normalized) based on the normalized last state."""
-        state_trajectory = state['full_trajectory']
+        """Select action (normalized) based on the normalized last state (incl heading).
+           'evaluate=True' means deterministic action (mean), 'evaluate=False' means stochastic action (sample).
+        """
+        state_trajectory = state['full_trajectory'] # Includes heading
         if np.isnan(state_trajectory).any(): return 0.0
 
+        # Extract the last basic state (incl heading)
         last_basic_state_normalized = torch.FloatTensor(state_trajectory[-1, :self.state_dim]).to(self.device).unsqueeze(0)
 
         if self.use_state_normalization and self.state_normalizer:
@@ -434,9 +438,11 @@ class TSAC:
         self.actor.eval()
         with torch.no_grad():
             if evaluate:
+                # Deterministic action (tanh of mean)
                 mean, _ = self.actor.forward(network_input)
                 action_normalized = torch.tanh(mean)
             else:
+                # Stochastic action (sample)
                 action_normalized, _, _ = self.actor.sample(network_input)
         self.actor.train()
 
@@ -458,48 +464,61 @@ class TSAC:
             weights_tensor = torch.ones(batch_size, 1, device=self.device)
 
         # Extract data from dictionary
-        state_batch = batch_data['state']
-        action_batch_current = batch_data['action']
-        reward_batch = batch_data['reward']
-        next_state_batch = batch_data['next_state']
-        done_batch = batch_data['done']
+        state_batch = batch_data['state'] # Includes heading
+        action_batch_current = batch_data['action'] # Last action a_N
+        reward_batch = batch_data['reward'] # Reward r_N+1 (if N is length)
+        next_state_batch = batch_data['next_state'] # Includes heading for S_N+1
+        done_batch = batch_data['done'] # Done flag for S_N+1
 
-        state_batch_tensor = torch.FloatTensor(state_batch).to(self.device)
-        action_batch_current_tensor = torch.FloatTensor(action_batch_current).to(self.device)
-        reward_batch_tensor = torch.FloatTensor(reward_batch).to(self.device).unsqueeze(1)
-        next_state_batch_tensor = torch.FloatTensor(next_state_batch).to(self.device)
-        done_batch_tensor = torch.FloatTensor(done_batch).to(self.device).unsqueeze(1)
+        state_batch_tensor = torch.FloatTensor(state_batch).to(self.device) # (b, N, feat)
+        action_batch_current_tensor = torch.FloatTensor(action_batch_current).to(self.device) # (b, 1)
+        reward_batch_tensor = torch.FloatTensor(reward_batch).to(self.device).unsqueeze(1) # (b, 1) - UNUSED directly
+        next_state_batch_tensor = torch.FloatTensor(next_state_batch).to(self.device) # (b, N, feat)
+        done_batch_tensor = torch.FloatTensor(done_batch).to(self.device).unsqueeze(1) # (b, 1)
 
         # --- State Processing and Normalization ---
-        normalized_basic_states_batch = state_batch_tensor[:, :, :self.state_dim]
-        sN_normalized = next_state_batch_tensor[:, -1, :self.state_dim]
+        # Extract basic states (incl heading) from trajectories
+        normalized_basic_states_batch = state_batch_tensor[:, :, :self.state_dim] # (b, N, state_dim)
+        # Get S_N+1 state (incl heading) from the end of the *next_state* trajectory
+        sN_plus_1_normalized = next_state_batch_tensor[:, -1, :self.state_dim] # (b, state_dim)
 
+        # Update normalizer stats (optional)
         if self.use_state_normalization and self.state_normalizer:
+            # Update with S0..S_N-1 from state_batch
             self.state_normalizer.update(normalized_basic_states_batch.reshape(-1, self.state_dim))
-            self.state_normalizer.update(sN_normalized)
+            # Update with S_N+1 from next_state_batch
+            self.state_normalizer.update(sN_plus_1_normalized)
 
-        initial_state_normalized = normalized_basic_states_batch[:, 0, :]
+        # Prepare inputs for networks
+        initial_state_normalized = normalized_basic_states_batch[:, 0, :] # S0 (b, state_dim)
+        # Target states S1, S2, ..., S_N, S_N+1
         target_states_normalized = torch.cat([
-            normalized_basic_states_batch[:, 1:, :],
-            sN_normalized.unsqueeze(1)
-        ], dim=1)
+            normalized_basic_states_batch[:, 1:, :], # S1 .. S_N-1
+            sN_plus_1_normalized.unsqueeze(1) # S_N+1
+        ], dim=1) # (b, N, state_dim) - Note: N here is seq_len
 
+        # Apply normalization if enabled
         if self.use_state_normalization and self.state_normalizer:
-            initial_state_input = self.state_normalizer.normalize(initial_state_normalized)
+            initial_state_input = self.state_normalizer.normalize(initial_state_normalized) # S0 normalized input
             batch_norm, seq_len_norm, state_dim_norm = target_states_normalized.shape
+            # Normalize S1..S_N+1 for target Q calculation
             target_states_input = self.state_normalizer.normalize(
                 target_states_normalized.reshape(-1, state_dim_norm)
             ).reshape(batch_norm, seq_len_norm, state_dim_norm)
+            # Actor uses S0 normalized input
             actor_initial_state_input = initial_state_input
         else:
-            initial_state_input = initial_state_normalized
-            target_states_input = target_states_normalized
-            actor_initial_state_input = initial_state_normalized
+            initial_state_input = initial_state_normalized # S0
+            target_states_input = target_states_normalized # S1..S_N+1
+            actor_initial_state_input = initial_state_normalized # S0
 
         # --- Action and Reward Sequences ---
-        action_sequence_prefix = state_batch_tensor[:, 1:, self.state_dim:(self.state_dim + self.action_dim)]
-        action_sequence = torch.cat([action_sequence_prefix, action_batch_current_tensor.unsqueeze(1)], dim=1)
-        rewards_sequence = state_batch_tensor[:, :, -1]
+        # Extract actions A1..A_N-1 from state_batch features
+        action_sequence_prefix = state_batch_tensor[:, 1:, self.state_dim:(self.state_dim + self.action_dim)] # (b, N-1, act_dim)
+        # Append A_N (the current action from batch_data)
+        action_sequence = torch.cat([action_sequence_prefix, action_batch_current_tensor.unsqueeze(1)], dim=1) # (b, N, act_dim)
+        # Extract rewards R1..R_N from state_batch features
+        rewards_sequence = state_batch_tensor[:, :, -1] # (b, N) - rewards R1..RN are in the *state* batch
 
         current_alpha = self.log_alpha.exp().detach()
 
@@ -509,52 +528,63 @@ class TSAC:
         self.critic1_target.eval()
         self.critic2_target.eval()
         with torch.no_grad():
-            batch_size_b, seq_len_n, state_dim_s = target_states_input.shape
+            batch_size_b, seq_len_n, state_dim_s = target_states_input.shape # seq_len_n is N here
+            # Flatten S1..S_N+1 for actor sampling
             flat_target_states_input = target_states_input.reshape(-1, state_dim_s)
+            # Get actions A'1..A'_N+1 and their log probs
             next_actions_flat, next_log_probs_flat, _ = self.actor.sample(flat_target_states_input)
-            next_actions_target = next_actions_flat.reshape(batch_size_b, seq_len_n, self.action_dim)
-            next_log_probs_target = next_log_probs_flat.reshape(batch_size_b, seq_len_n, 1)
+            # Reshape actions and log probs
+            next_actions_target = next_actions_flat.reshape(batch_size_b, seq_len_n, self.action_dim) # (b, N, act_dim)
+            next_log_probs_target = next_log_probs_flat.reshape(batch_size_b, seq_len_n, 1) # (b, N, 1)
 
             Q1_target_values = []
             Q2_target_values = []
-            for n_idx in range(self.sequence_length):
-                state_sn_input = target_states_input[:, n_idx, :]
-                action_an_prime = next_actions_target[:, n_idx, :]
-                # Use target transformer critic
-                q1_sn_an_prime = self.critic1_target(state_sn_input, action_an_prime.unsqueeze(1)).squeeze(1)
-                q2_sn_an_prime = self.critic2_target(state_sn_input, action_an_prime.unsqueeze(1)).squeeze(1)
+            # Calculate Q_target(S_n, A'_n) for n=1..N
+            # Loop N times for N states (S1..SN)
+            for n_idx in range(seq_len_n): # N = self.sequence_length
+                state_sn_input = target_states_input[:, n_idx, :] # Sn
+                action_an_prime = next_actions_target[:, n_idx, :] # A'n
+                # Use target transformer critic: Q(Sn, [A'n]) -> expects seq length 1
+                q1_sn_an_prime = self.critic1_target(state_sn_input, action_an_prime.unsqueeze(1)).squeeze(1) # (b, 1)
+                q2_sn_an_prime = self.critic2_target(state_sn_input, action_an_prime.unsqueeze(1)).squeeze(1) # (b, 1)
                 Q1_target_values.append(q1_sn_an_prime)
                 Q2_target_values.append(q2_sn_an_prime)
 
-            Q1_target_all = torch.stack(Q1_target_values, dim=1)
-            Q2_target_all = torch.stack(Q2_target_values, dim=1)
-            Q_target_min_all = torch.min(Q1_target_all, Q2_target_all)
-            V_target_all = Q_target_min_all - current_alpha * next_log_probs_target
+            Q1_target_all = torch.stack(Q1_target_values, dim=1) # (b, N, 1)
+            Q2_target_all = torch.stack(Q2_target_values, dim=1) # (b, N, 1)
+            Q_target_min_all = torch.min(Q1_target_all, Q2_target_all) # (b, N, 1)
+            # V_target(Sn) = Q_target_min(Sn, A'n) - alpha * log pi(A'n | Sn)
+            V_target_all = Q_target_min_all - current_alpha * next_log_probs_target # (b, N, 1)
 
-            for n in range(1, self.sequence_length + 1):
+            # Calculate N-step return targets G_n
+            for n in range(1, self.sequence_length + 1): # n goes from 1 to N
+                 # Sum rewards R1..Rn
                  reward_sum = torch.sum(rewards_sequence[:, :n] * self.gamma_powers[:, :n], dim=1, keepdim=True)
+                 # Get V_target(S_n) - index n-1 corresponds to state Sn
                  V_target_sn = V_target_all[:, n-1, :]
+                 # Done mask is only relevant for the final step V_target(S_N+1) if N=seq_len
                  done_mask_n = done_batch_tensor if n == self.sequence_length else torch.zeros_like(done_batch_tensor)
                  target_G = reward_sum + self.gamma_powers[:, n] * V_target_sn * (1.0 - done_mask_n)
-                 targets_G_n.append(target_G)
+                 targets_G_n.append(target_G) # List of N targets G1..GN
 
         # --- Critic Update with PER ---
         self.critic1.train(); self.critic2.train()
         self.critic1_optimizer.zero_grad()
         self.critic2_optimizer.zero_grad()
 
-        Q1_pred_seq = self.critic1(initial_state_input, action_sequence)
-        Q2_pred_seq = self.critic2(initial_state_input, action_sequence)
+        # Get Q predictions for A1..AN using S0 and the action sequence
+        Q1_pred_seq = self.critic1(initial_state_input, action_sequence) # (b, N, 1)
+        Q2_pred_seq = self.critic2(initial_state_input, action_sequence) # (b, N, 1)
 
         total_weighted_loss1 = 0.0
         total_weighted_loss2 = 0.0
         td_errors_n_step = [] # Store TD errors for priority update
 
         # Average the weighted loss gradient over N steps
-        for n in range(1, self.sequence_length + 1):
-            q1_pred_n = Q1_pred_seq[:, n-1, :]
-            q2_pred_n = Q2_pred_seq[:, n-1, :]
-            target_G_n = targets_G_n[n-1].detach()
+        for n in range(1, self.sequence_length + 1): # n from 1 to N
+            q1_pred_n = Q1_pred_seq[:, n-1, :] # Q1(S0, A1..An) -> corresponds to An
+            q2_pred_n = Q2_pred_seq[:, n-1, :] # Q2(S0, A1..An) -> corresponds to An
+            target_G_n = targets_G_n[n-1].detach() # Gn
 
             # Calculate element-wise loss
             loss1_n_unreduced = F.mse_loss(q1_pred_n, target_G_n, reduction='none')
@@ -599,7 +629,9 @@ class TSAC:
         for p in self.critic1.parameters(): p.requires_grad = False
         for p in self.critic2.parameters(): p.requires_grad = False
         self.actor.train()
+        # Actor uses S0 state input
         action_pi_t0, log_prob_pi_t0, _ = self.actor.sample(actor_initial_state_input)
+        # Evaluate Q(S0, A0') - requires critic call with seq length 1
         q1_pi_t0 = self.critic1(initial_state_input, action_pi_t0.unsqueeze(1)).squeeze(1)
         q2_pi_t0 = self.critic2(initial_state_input, action_pi_t0.unsqueeze(1)).squeeze(1)
         q_pi_min_t0 = torch.min(q1_pi_t0, q2_pi_t0)
@@ -697,7 +729,14 @@ class TSAC:
                  print(f"Warning: Loaded model STATE normalization setting ({loaded_use_state_norm}) differs from current config ({self.use_state_normalization}). Using current config setting.")
             if self.use_state_normalization and self.state_normalizer:
                  if 'state_normalizer_state_dict' in checkpoint:
-                     try: self.state_normalizer.load_state_dict(checkpoint['state_normalizer_state_dict']); print("Loaded T-SAC state normalizer statistics.")
+                     try:
+                         # Check shapes before loading
+                         loaded_mean_shape = checkpoint['state_normalizer_state_dict']['mean'].shape
+                         if loaded_mean_shape != self.state_normalizer.mean.shape:
+                             print(f"Warning: Mismatch in loaded T-SAC state normalizer shape ({loaded_mean_shape}) and current ({self.state_normalizer.mean.shape}). Reinitializing normalizer.")
+                         else:
+                             self.state_normalizer.load_state_dict(checkpoint['state_normalizer_state_dict'])
+                             print(f"Loaded T-SAC state normalizer statistics (dim={self.state_dim}).") # Updated print
                      except Exception as e: print(f"Warning: Failed to load T-SAC state normalizer stats: {e}.")
                  else: print("Warning: T-SAC state normalizer stats not found in checkpoint.")
 
@@ -840,7 +879,7 @@ def train_tsac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluatio
     pbar = tqdm(range(start_episode, train_config.num_episodes + 1), desc="Training T-SAC Mapping", unit="episode", initial=start_episode-1, total=train_config.num_episodes)
 
     for episode in pbar:
-        state = world.reset()
+        state = world.reset() # state dict
         episode_reward = 0
         episode_steps = 0
         episode_losses_temp = {'critic1_loss': [], 'critic2_loss': [], 'actor_loss': [], 'alpha': [], 'alpha_loss': [], 'beta': []} # Added beta
@@ -848,9 +887,10 @@ def train_tsac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluatio
         episode_metrics = []
 
         for step_in_episode in range(train_config.max_steps):
-            action_normalized = agent.select_action(state, evaluate=False)
+            action_normalized = agent.select_action(state, evaluate=False) # Sample during training
 
             step_start_time = time.time()
+            # Reward calculation happens inside world.step regardless of training flag
             next_state = world.step(action_normalized, training=True, terminal_step=(step_in_episode == train_config.max_steps - 1))
             timing_metrics['env_step_time'].append(time.time() - step_start_time)
 
@@ -924,9 +964,15 @@ def train_tsac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluatio
                 writer.add_scalar('Stats/TSAC_Normalizer_Count', agent.state_normalizer.count.item(), log_step)
                 writer.add_scalar('Stats/TSAC_Normalizer_Mean_Sensor0', agent.state_normalizer.mean[0].item(), log_step)
                 writer.add_scalar('Stats/TSAC_Normalizer_Std_Sensor0', torch.sqrt(agent.state_normalizer.var[0].clamp(min=1e-8)).item(), log_step)
-                if agent.state_dim > 5:
+                if agent.state_dim > 5: # Log X coord norm
                      writer.add_scalar('Stats/TSAC_Normalizer_Mean_AgentXNorm', agent.state_normalizer.mean[5].item(), log_step)
                      writer.add_scalar('Stats/TSAC_Normalizer_Std_AgentXNorm', torch.sqrt(agent.state_normalizer.var[5].clamp(min=1e-8)).item(), log_step)
+                if agent.state_dim > 6: # Log Y coord norm
+                     writer.add_scalar('Stats/TSAC_Normalizer_Mean_AgentYNorm', agent.state_normalizer.mean[6].item(), log_step)
+                     writer.add_scalar('Stats/TSAC_Normalizer_Std_AgentYNorm', torch.sqrt(agent.state_normalizer.var[6].clamp(min=1e-8)).item(), log_step)
+                if agent.state_dim > 7: # Log Heading norm
+                     writer.add_scalar('Stats/TSAC_Normalizer_Mean_AgentHeadingNorm', agent.state_normalizer.mean[7].item(), log_step)
+                     writer.add_scalar('Stats/TSAC_Normalizer_Std_AgentHeadingNorm', torch.sqrt(agent.state_normalizer.var[7].clamp(min=1e-8)).item(), log_step)
 
             lookback = min(100, len(episode_rewards))
             avg_reward_100 = np.mean(episode_rewards[-lookback:]) if episode_rewards else 0
@@ -992,6 +1038,8 @@ def evaluate_tsac(agent: TSAC, config: DefaultConfig):
     eval_config = config.evaluation
     world_config = config.world
     vis_config = config.visualization
+    # Use stochastic policy during evaluation?
+    use_stochastic_policy = eval_config.use_stochastic_policy_eval
 
     vis_available = False
     visualize_world, reset_trajectories, save_gif = None, None, None
@@ -1014,7 +1062,8 @@ def evaluate_tsac(agent: TSAC, config: DefaultConfig):
     if agent.use_state_normalization and agent.state_normalizer:
         agent.state_normalizer.eval()
 
-    print(f"\nRunning T-SAC Evaluation for {eval_config.num_episodes} episodes...")
+    policy_mode = "Stochastic" if use_stochastic_policy else "Deterministic"
+    print(f"\nRunning T-SAC Evaluation ({policy_mode} Policy) for {eval_config.num_episodes} episodes...")
     eval_seeds = world_config.seeds
     if len(eval_seeds) != eval_config.num_episodes:
          print(f"Warning: Number of evaluation seeds ({len(eval_seeds)}) doesn't match num_episodes ({eval_config.num_episodes}). Using first {eval_config.num_episodes} seeds or generating if needed.")
@@ -1027,7 +1076,7 @@ def evaluate_tsac(agent: TSAC, config: DefaultConfig):
 
     for episode in range(eval_config.num_episodes):
         seed_to_use = eval_seeds[episode] if eval_seeds else None
-        state = world.reset(seed=seed_to_use)
+        state = world.reset(seed=seed_to_use) # state dict
         episode_reward = 0
         episode_frames = []
         episode_metrics_current = []
@@ -1036,22 +1085,24 @@ def evaluate_tsac(agent: TSAC, config: DefaultConfig):
             os.makedirs(vis_config.save_dir, exist_ok=True)
             if reset_trajectories: reset_trajectories()
             try:
-                fname = f"tsac_eval_ep{episode+1}_frame_000_initial.png"
+                fname = f"tsac_{policy_mode.lower()}_eval_ep{episode+1}_frame_000_initial.png"
                 initial_frame_file = visualize_world(world, vis_config, filename=fname)
                 if initial_frame_file and os.path.exists(initial_frame_file): episode_frames.append(initial_frame_file)
             except Exception as e: print(f"Warn: Vis failed init state ep {episode+1}. E: {e}")
 
         for step in range(eval_config.max_steps):
-            action_normalized = agent.select_action(state, evaluate=True)
+            # Select action: evaluate=True -> deterministic (mean), evaluate=False -> stochastic (sample)
+            action_normalized = agent.select_action(state, evaluate=(not use_stochastic_policy))
+            # Step the world using training=False BUT reward calculation is always done inside world.step
             next_state = world.step(action_normalized, training=False, terminal_step=(step == eval_config.max_steps - 1))
-            reward = world.reward
+            reward = world.reward # Get the reward calculated
             done = world.done
             current_metric = world.performance_metric
             episode_metrics_current.append(current_metric)
 
             if eval_config.render and vis_available:
                 try:
-                    fname = f"tsac_eval_ep{episode+1}_frame_{step+1:03d}.png"
+                    fname = f"tsac_{policy_mode.lower()}_eval_ep{episode+1}_frame_{step+1:03d}.png"
                     frame_file = visualize_world(world, vis_config, filename=fname)
                     if frame_file and os.path.exists(frame_file): episode_frames.append(frame_file)
                 except Exception as e: print(f"Warn: Vis failed step {step+1} ep {episode+1}. E: {e}")
@@ -1066,12 +1117,12 @@ def evaluate_tsac(agent: TSAC, config: DefaultConfig):
         success = final_metric >= world_config.success_metric_threshold
         if success: success_count += 1
         status = "Success!" if success else "Failure."
-        print(f"  Ep {episode+1}/{eval_config.num_episodes} (Seed:{world.current_seed}): Steps={world.current_step}, Terminated={world.done}, Final Metric: {final_metric:.3f}. {status}")
+        print(f"  Ep {episode+1}/{eval_config.num_episodes} (Seed:{world.current_seed}): Steps={world.current_step}, Terminated={world.done}, Final Metric: {final_metric:.3f}, Accum Reward: {episode_reward:.2f}. {status}")
 
         if eval_config.render and vis_available and episode_frames and save_gif:
-            gif_filename = f"tsac_mapping_eval_episode_{episode+1}_seed{world.current_seed}.gif"
+            gif_filename = f"tsac_mapping_eval_{policy_mode.lower()}_episode_{episode+1}_seed{world.current_seed}.gif"
             try:
-                print(f"  Saving GIF for T-SAC episode {episode+1} with {len(episode_frames)} frames...")
+                print(f"  Saving GIF for T-SAC episode {episode+1} ({policy_mode}) with {len(episode_frames)} frames...")
                 gif_path = save_gif(output_filename=gif_filename, vis_config=vis_config, frame_paths=episode_frames, delete_frames=vis_config.delete_frames_after_gif)
                 if gif_path: all_episode_gif_paths.append(gif_path)
             except Exception as e: print(f"  Warn: Failed GIF save ep {episode+1}. E: {e}")
@@ -1087,14 +1138,14 @@ def evaluate_tsac(agent: TSAC, config: DefaultConfig):
     std_eval_metric = np.std(eval_metrics) if eval_metrics else 0.0
     success_rate = success_count / eval_config.num_episodes if eval_config.num_episodes > 0 else 0.0
 
-    print("\n--- T-SAC Evaluation Summary ---")
+    print(f"\n--- T-SAC Evaluation Summary ({policy_mode} Policy) ---")
     print(f"Episodes: {eval_config.num_episodes}")
     print(f"Average Final Metric (Point Inclusion): {avg_eval_metric:.3f} +/- {std_eval_metric:.3f}")
     print(f"Success Rate (Metric >= {world_config.success_metric_threshold:.2f}): {success_rate:.2%} ({success_count}/{eval_config.num_episodes})")
-    print(f"Average Episode Reward: {avg_eval_reward:.3f} +/- {std_eval_reward:.3f}")
+    print(f"Average Accumulated Episode Reward: {avg_eval_reward:.3f} +/- {std_eval_reward:.3f}")
     if eval_config.render and vis_available and all_episode_gif_paths: print(f"GIFs saved to: '{os.path.abspath(vis_config.save_dir)}'")
     elif eval_config.render and not vis_available: print("Rendering was enabled but visualization libraries were not found.")
     elif not eval_config.render: print("Rendering disabled.")
-    print("--- End T-SAC Evaluation ---\n")
+    print(f"--- End T-SAC Evaluation ({policy_mode} Policy) ---\n")
 
     return eval_rewards, success_rate, avg_eval_metric

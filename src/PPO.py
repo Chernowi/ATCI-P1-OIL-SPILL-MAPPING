@@ -10,12 +10,12 @@ from collections import deque, defaultdict # Added defaultdict
 from tqdm import tqdm
 import random
 from typing import Tuple, Optional, Union, Dict, Any, List # Added List
+import math # Added
 
 # Local imports
 from world import World
 from configs import DefaultConfig, PPOConfig, TrainingConfig, CORE_STATE_DIM, WorldConfig
 from torch.utils.tensorboard import SummaryWriter
-import math
 from utils import RunningMeanStd
 # Import RNN padding utilities
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
@@ -25,7 +25,7 @@ class RecurrentPPOMemory:
     """Memory buffer for Recurrent PPO, storing sequences."""
     def __init__(self, config: PPOConfig, world_config: WorldConfig, device: torch.device):
         self.steps_per_update = config.steps_per_update
-        self.state_dim = config.state_dim
+        self.state_dim = config.state_dim # Includes heading
         self.use_rnn = config.use_rnn
         self.rnn_type = config.rnn_type
         self.rnn_num_layers = config.rnn_num_layers
@@ -60,9 +60,9 @@ class RecurrentPPOMemory:
     def store(self, state_basic: tuple, action: float, log_prob: float, value: float,
               reward: float, done: bool, actor_hxs, critic_hxs):
         """Store one step of experience in the current rollout buffer."""
-        # State should be the normalized basic state tuple
+        # State should be the normalized basic state tuple (incl heading)
         if not isinstance(state_basic, tuple) or len(state_basic) != self.state_dim:
-             print(f"Warning (store): Invalid state_basic format. Len={len(state_basic) if isinstance(state_basic, tuple) else 'N/A'}")
+             print(f"Warning (store): Invalid state_basic format. Len={len(state_basic) if isinstance(state_basic, tuple) else 'N/A'}, Expected={self.state_dim}")
              return
         if any(np.isnan(x) for x in state_basic):
              print("Warning (store): NaN detected in state_basic.")
@@ -255,7 +255,7 @@ class PolicyNetwork(nn.Module):
     def __init__(self, config: PPOConfig):
         super(PolicyNetwork, self).__init__()
         self.config = config
-        self.state_dim = config.state_dim
+        self.state_dim = config.state_dim # Includes heading
         self.action_dim = config.action_dim
         self.hidden_dim = config.hidden_dim # MLP hidden dim
         self.log_std_min = config.log_std_min
@@ -265,7 +265,7 @@ class PolicyNetwork(nn.Module):
         if self.use_rnn:
             self.rnn_hidden_size = config.rnn_hidden_size
             self.rnn_num_layers = config.rnn_num_layers
-            rnn_input_dim = self.state_dim # RNN takes normalized state sequence
+            rnn_input_dim = self.state_dim # RNN takes normalized state sequence (incl heading)
             if config.rnn_type == 'lstm':
                 self.rnn = nn.LSTM(input_size=rnn_input_dim, hidden_size=self.rnn_hidden_size,
                                    num_layers=self.rnn_num_layers, batch_first=True)
@@ -276,7 +276,7 @@ class PolicyNetwork(nn.Module):
             mlp_input_dim = self.rnn_hidden_size # MLP takes RNN output
         else:
             self.rnn = None
-            mlp_input_dim = self.state_dim # MLP takes normalized state directly
+            mlp_input_dim = self.state_dim # MLP takes normalized state directly (incl heading)
 
         # MLP layers after potential RNN
         self.fc1 = nn.Linear(mlp_input_dim, self.hidden_dim)
@@ -287,7 +287,7 @@ class PolicyNetwork(nn.Module):
     def forward(self, network_input: torch.Tensor, hidden_state: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None, lengths: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]]:
         """
         Forward pass. Handles sequences and optional padding.
-        network_input: (batch, seq_len, state_dim)
+        network_input: (batch, seq_len, state_dim) or (batch, state_dim)
         hidden_state: Previous hidden state for RNN (used for step-by-step or BPTT start)
         lengths: Tensor of sequence lengths for packing (optional, improves efficiency)
         Returns: action_mean_sequence, action_std_sequence, final_hidden_state
@@ -390,14 +390,14 @@ class ValueNetwork(nn.Module):
     def __init__(self, config: PPOConfig):
         super(ValueNetwork, self).__init__()
         self.config = config
-        self.state_dim = config.state_dim
+        self.state_dim = config.state_dim # Includes heading
         self.hidden_dim = config.hidden_dim # MLP hidden dim
         self.use_rnn = config.use_rnn
 
         if self.use_rnn:
             self.rnn_hidden_size = config.rnn_hidden_size
             self.rnn_num_layers = config.rnn_num_layers
-            rnn_input_dim = self.state_dim # RNN takes normalized state sequence
+            rnn_input_dim = self.state_dim # RNN takes normalized state sequence (incl heading)
             if config.rnn_type == 'lstm':
                 self.rnn = nn.LSTM(input_size=rnn_input_dim, hidden_size=self.rnn_hidden_size,
                                    num_layers=self.rnn_num_layers, batch_first=True)
@@ -408,7 +408,7 @@ class ValueNetwork(nn.Module):
             mlp_input_dim = self.rnn_hidden_size # MLP takes RNN output
         else:
             self.rnn = None
-            mlp_input_dim = self.state_dim # MLP takes normalized state directly
+            mlp_input_dim = self.state_dim # MLP takes normalized state directly (incl heading)
 
         # MLP layers after potential RNN
         self.fc1 = nn.Linear(mlp_input_dim, self.hidden_dim)
@@ -491,7 +491,7 @@ class PPO:
         self.n_epochs = config.n_epochs
         self.entropy_coef = config.entropy_coef
         self.value_coef = config.value_coef
-        self.state_dim = config.state_dim
+        self.state_dim = config.state_dim # Now includes heading
         self.use_rnn = config.use_rnn
 
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -503,8 +503,9 @@ class PPO:
         self.use_state_normalization = config.use_state_normalization
         self.state_normalizer = None
         if self.use_state_normalization:
+             # Use the updated state_dim
             self.state_normalizer = RunningMeanStd(shape=(self.state_dim,), device=self.device)
-            print(f"PPO Agent state normalization ENABLED (dim={self.state_dim})")
+            print(f"PPO Agent state normalization ENABLED (dim={self.state_dim}, incl. heading)") # Updated print
         else:
             print("PPO Agent state normalization DISABLED.")
 
@@ -522,16 +523,17 @@ class PPO:
         self.memory = RecurrentPPOMemory(config=config, world_config=world_config, device=self.device)
 
     def select_action(self,
-                      state: dict, # Contains 'basic_state' tuple
+                      state: dict, # Contains 'basic_state' tuple (incl heading)
                       actor_hidden_state: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
                       critic_hidden_state: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
                       evaluate: bool = False
                       ) -> Tuple[float, float, float, Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]], Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]]:
         """
-        Select action based on the current normalized basic state.
+        Select action based on the current normalized basic state (incl heading).
         Returns: action_float, log_prob_float, value_float, next_actor_hidden, next_critic_hidden
+        'evaluate=True' means deterministic action (mean), 'evaluate=False' means stochastic action (sample).
         """
-        basic_state_normalized_tuple = state['basic_state']
+        basic_state_normalized_tuple = state['basic_state'] # Includes heading
         state_tensor_normalized = torch.FloatTensor(basic_state_normalized_tuple).to(self.device) # (state_dim,)
 
         # Normalize state if enabled
@@ -555,11 +557,11 @@ class PPO:
                 # Get deterministic action (mean) - still need forward pass
                 action_mean, _, next_actor_hidden = self.actor.forward(network_input, actor_hidden_state)
                 action_normalized = torch.tanh(action_mean.squeeze(1)) # Use mean, shape (1, act_dim)
-                # Critic forward pass for value (used for GAE later, but needed here for return signature)
+                # Critic forward pass for value (needed for return signature, even if not used directly in eval action selection)
                 value_tensor, next_critic_hidden = self.critic(network_input, critic_hidden_state)
                 value_tensor = value_tensor.squeeze(1) # shape (1, 1)
             else:
-                # Sample action for training
+                # Sample action for training or stochastic evaluation
                 action_normalized, log_prob_tensor, next_actor_hidden = self.actor.sample(network_input, actor_hidden_state)
                 # Get value prediction
                 value_tensor, next_critic_hidden = self.critic(network_input, critic_hidden_state)
@@ -591,6 +593,7 @@ class PPO:
         # --- Update State Normalizer Stats ---
         if self.use_state_normalization and self.state_normalizer:
             # Combine all states from memory for update
+            # all_states_flat will now include the heading dimension
             all_states_flat = np.concatenate([s for rollout in self.memory.memory_states for s in rollout])
             if len(all_states_flat) > 0:
                  self.state_normalizer.update(torch.from_numpy(all_states_flat).to(self.device))
@@ -614,7 +617,7 @@ class PPO:
 
             for batch in batch_generator:
                 # Get data for the current batch
-                batch_states = batch["states"] # (batch_size, seq_len, state_dim)
+                batch_states = batch["states"] # (batch_size, seq_len, state_dim) - incl heading
                 batch_actions = batch["actions"] # (batch_size, seq_len, action_dim)
                 batch_old_log_probs = batch["old_log_probs"] # (batch_size, seq_len, 1)
                 batch_advantages = batch["advantages"] # (batch_size, seq_len, 1)
@@ -725,7 +728,7 @@ class PPO:
             self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])
             self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer_state_dict'])
         except RuntimeError as e:
-             print(f"Error loading model state_dict (possibly due to RNN mismatch): {e}")
+             print(f"Error loading model state_dict (possibly due to RNN/state_dim mismatch): {e}") # Added state_dim hint
              print("Skipping loading model weights due to error.")
              return
 
@@ -734,7 +737,14 @@ class PPO:
             print(f"Warning: Loaded model STATE normalization setting ({loaded_use_state_norm}) differs from current config ({self.use_state_normalization}). Using current config setting.")
         if self.use_state_normalization and self.state_normalizer:
             if 'state_normalizer_state_dict' in checkpoint:
-                try: self.state_normalizer.load_state_dict(checkpoint['state_normalizer_state_dict']); print("Loaded PPO state normalizer statistics.")
+                try:
+                    # Check shapes before loading
+                    loaded_mean_shape = checkpoint['state_normalizer_state_dict']['mean'].shape
+                    if loaded_mean_shape != self.state_normalizer.mean.shape:
+                         print(f"Warning: Mismatch in loaded PPO state normalizer shape ({loaded_mean_shape}) and current ({self.state_normalizer.mean.shape}). Reinitializing normalizer.")
+                    else:
+                         self.state_normalizer.load_state_dict(checkpoint['state_normalizer_state_dict'])
+                         print(f"Loaded PPO state normalizer statistics (dim={self.state_dim}).") # Updated print
                 except Exception as e: print(f"Warning: Failed to load PPO state normalizer stats: {e}.")
             else: print("Warning: PPO state normalizer statistics not found in checkpoint.")
 
@@ -847,7 +857,7 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
         actor_hxs = agent.actor.get_initial_hidden_state(1, device)
         critic_hxs = agent.critic.get_initial_hidden_state(1, device)
 
-    state = world.reset() # Get initial state
+    state = world.reset() # Get initial state dict
 
     for episode in pbar:
         # --- Reset hidden states at the start of each episode ---
@@ -866,14 +876,15 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
         while agent.memory.current_rollout_len < agent.memory.steps_per_update:
             # Select action using hidden states
             action, log_prob, value, next_actor_hxs, next_critic_hxs = agent.select_action(
-                state,
+                state, # state dict (incl basic_state with heading)
                 actor_hidden_state=actor_hxs,
                 critic_hidden_state=critic_hxs,
-                evaluate=False
+                evaluate=False # Always stochastic during training rollout
             )
 
             step_start_time = time.time()
-            next_state_dict = world.step(action, training=True, terminal_step=(episode_steps == train_config.max_steps - 1)) # world.step returns state dict
+            # Reward calculation happens inside world.step regardless of training flag
+            next_state_dict = world.step(action, training=True, terminal_step=(episode_steps == train_config.max_steps - 1))
             step_time = time.time() - step_start_time
             timing_metrics['env_step_time'].append(step_time)
 
@@ -886,6 +897,7 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                 if key in episode_reward_components: episode_reward_components[key] += val
 
             # Store the transition: state is the one *before* the step
+            # Pass the basic_state tuple (incl heading)
             agent.store_step(state['basic_state'], action, log_prob, value, reward, done, actor_hxs, critic_hxs)
 
             state = next_state_dict # state for the *next* iteration
@@ -930,6 +942,7 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
             if agent.memory.total_samples_in_memory >= agent.memory.steps_per_update:
                  # Need value of the very last state for GAE
                  with torch.no_grad():
+                      # Call select_action with evaluate=True to get value estimate without sampling
                       _, _, last_value, _, _ = agent.select_action(state, actor_hxs, critic_hxs, evaluate=True)
                  break # Break inner loop to proceed to update
 
@@ -940,6 +953,7 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
              with torch.no_grad():
                   # Need to get value V(s_T+1) where T = steps_per_update
                   # The 'state' variable holds the state after the last stored step
+                  # Call select_action with evaluate=True to get value estimate without sampling
                   _, _, last_value, _, _ = agent.select_action(state, actor_hxs, critic_hxs, evaluate=True)
                   last_done = world.done # Use the 'done' flag from the world after the last step
 
@@ -988,9 +1002,16 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                 writer.add_scalar('Stats/PPO_Normalizer_Count', agent.state_normalizer.count.item(), log_step)
                 writer.add_scalar('Stats/PPO_Normalizer_Mean_Sensor0', agent.state_normalizer.mean[0].item(), log_step)
                 writer.add_scalar('Stats/PPO_Normalizer_Std_Sensor0', torch.sqrt(agent.state_normalizer.var[0].clamp(min=1e-8)).item(), log_step)
-                if agent.state_dim > 5:
+                if agent.state_dim > 5: # Log X coord norm
                      writer.add_scalar('Stats/PPO_Normalizer_Mean_AgentXNorm', agent.state_normalizer.mean[5].item(), log_step)
                      writer.add_scalar('Stats/PPO_Normalizer_Std_AgentXNorm', torch.sqrt(agent.state_normalizer.var[5].clamp(min=1e-8)).item(), log_step)
+                if agent.state_dim > 6: # Log Y coord norm
+                     writer.add_scalar('Stats/PPO_Normalizer_Mean_AgentYNorm', agent.state_normalizer.mean[6].item(), log_step)
+                     writer.add_scalar('Stats/PPO_Normalizer_Std_AgentYNorm', torch.sqrt(agent.state_normalizer.var[6].clamp(min=1e-8)).item(), log_step)
+                if agent.state_dim > 7: # Log Heading norm
+                     writer.add_scalar('Stats/PPO_Normalizer_Mean_AgentHeadingNorm', agent.state_normalizer.mean[7].item(), log_step)
+                     writer.add_scalar('Stats/PPO_Normalizer_Std_AgentHeadingNorm', torch.sqrt(agent.state_normalizer.var[7].clamp(min=1e-8)).item(), log_step)
+
 
             lookback = min(100, len(episode_rewards))
             avg_reward_100 = np.mean(episode_rewards[-lookback:]) if episode_rewards else 0
@@ -1047,53 +1068,61 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
 
 # --- MODIFIED Evaluation Loop (evaluate_ppo) ---
 # Evaluation loop remains largely the same as it correctly handles hidden state propagation
-def evaluate_ppo(agent: PPO, config: DefaultConfig):
+def evaluate_ppo(agent: PPO, config: DefaultConfig, model_path_for_eval: Optional[str] = None):
     eval_config = config.evaluation
     world_config = config.world
     vis_config = config.visualization
+    # Use stochastic policy during evaluation?
+    use_stochastic_policy = eval_config.use_stochastic_policy_eval
 
     # --- Conditional Visualization Import ---
-    # (Code unchanged)
+    # ... (unchanged) ...
     vis_available = False
     visualize_world, reset_trajectories, save_gif = None, None, None
     if eval_config.render:
         try:
             from visualization import visualize_world, reset_trajectories, save_gif
-            import imageio.v2 as imageio
+            import imageio.v2 as imageio # Keep import here
             vis_available = True; print("Visualization enabled.")
         except ImportError:
             print("Vis libs not found. Rendering disabled."); vis_available = False
     else: vis_available = False; print("Rendering disabled by config.")
 
 
-    eval_rewards = []
-    eval_metrics = []
+    eval_rewards = [] # Store accumulated *training* rewards during eval episodes
+    eval_final_metrics = [] # Store final metric per episode
     success_count = 0
     all_episode_gif_paths = []
 
     # --- Set Agent and Normalizer to Evaluation Mode ---
+    # Networks remain in eval() mode to disable dropout/batchnorm updates.
+    # The 'evaluate' flag in select_action controls deterministic vs stochastic action selection.
     agent.actor.eval()
     agent.critic.eval()
     if agent.use_state_normalization and agent.state_normalizer:
         agent.state_normalizer.eval()
 
-    print(f"\nRunning PPO {'RNN' if agent.use_rnn else 'MLP'} Evaluation for {eval_config.num_episodes} episodes...")
+    policy_mode = "Stochastic" if use_stochastic_policy else "Deterministic"
+    print(f"\nRunning PPO {'RNN' if agent.use_rnn else 'MLP'} Evaluation ({policy_mode} Policy) for {eval_config.num_episodes} episodes...")
+    if model_path_for_eval: print(f"Using model: {os.path.basename(model_path_for_eval)}")
+
     eval_seeds = world_config.seeds
-    # (Seed handling code unchanged)
-    if len(eval_seeds) != eval_config.num_episodes:
-         print(f"Warning: Seed count mismatch. Using first {eval_config.num_episodes} or generating.")
-         if len(eval_seeds) < eval_config.num_episodes:
-              eval_seeds.extend([random.randint(0, 2**32 - 1) for _ in range(eval_config.num_episodes - len(eval_seeds))])
-         eval_seeds = eval_seeds[:eval_config.num_episodes]
+    # Ensure enough seeds for evaluation episodes
+    num_eval_episodes = eval_config.num_episodes
+    if len(eval_seeds) < num_eval_episodes:
+         print(f"Warning: Seed count ({len(eval_seeds)}) < num_episodes ({num_eval_episodes}). Generating additional seeds.")
+         eval_seeds.extend([random.randint(0, 2**32 - 1) for _ in range(num_eval_episodes - len(eval_seeds))])
+    eval_seeds_to_use = eval_seeds[:num_eval_episodes] # Use only the required number
 
     world = World(world_config=world_config)
 
-    for episode in range(eval_config.num_episodes):
-        seed_to_use = eval_seeds[episode] if eval_seeds else None
-        state = world.reset(seed=seed_to_use) # Returns state dict
-        episode_reward = 0
+    for episode in range(num_eval_episodes):
+        # Use the specific seed for this evaluation episode
+        seed_to_use = eval_seeds_to_use[episode]
+        state = world.reset(seed=seed_to_use) # Get state dict
+        episode_reward_sum = 0.0 # Accumulate reward like in training
         episode_frames = []
-        episode_metrics_current = []
+        episode_steps = 0 # Track steps in this eval episode
 
         # --- Initialize hidden states for RNN ---
         actor_hxs, critic_hxs = None, None
@@ -1102,97 +1131,94 @@ def evaluate_ppo(agent: PPO, config: DefaultConfig):
             critic_hxs = agent.critic.get_initial_hidden_state(1, agent.device)
 
         # --- Visualization Setup ---
-        # (Code unchanged)
         if eval_config.render and vis_available:
             os.makedirs(vis_config.save_dir, exist_ok=True)
             if reset_trajectories: reset_trajectories()
             try:
-                fname = f"ppo_{'rnn' if agent.use_rnn else 'mlp'}_eval_ep{episode+1}_frame_000_initial.png"
+                fname = f"ppo_{'rnn' if agent.use_rnn else 'mlp'}_eval_{policy_mode.lower()}_seed{seed_to_use}_ep{episode+1}_frame_000_initial.png"
                 initial_frame_file = visualize_world(world, vis_config, filename=fname)
                 if initial_frame_file and os.path.exists(initial_frame_file): episode_frames.append(initial_frame_file)
             except Exception as e: print(f"Warn: Vis failed init state ep {episode+1}. E: {e}")
 
 
         for step in range(eval_config.max_steps):
-            # Select action using hidden states (evaluate=True)
-            # select_action returns: action, log_prob, value, next_actor_hxs, next_critic_hxs
-            action_normalized, _, _, next_actor_hxs, _ = agent.select_action(
-                state, # Pass the state dict
+            # Select action using hidden states
+            # evaluate=True -> deterministic (mean)
+            # evaluate=False -> stochastic (sample)
+            action_normalized, _, _, next_actor_hxs, next_critic_hxs = agent.select_action(
+                state, # Pass the state dict (incl basic_state with heading)
                 actor_hidden_state=actor_hxs,
                 critic_hidden_state=critic_hxs,
-                evaluate=True
+                evaluate=(not use_stochastic_policy) # Pass True for deterministic, False for stochastic
             )
 
-            # Step the world
+            # Step the world using training=False BUT reward calculation is always done inside world.step
             next_state = world.step(action_normalized, training=False, terminal_step=(step == eval_config.max_steps - 1))
-            reward = world.reward # Will be 0 if training=False
+            reward = world.reward # Get the reward calculated (terminal bonuses/penalties are gated by training=True in world.step)
             done = world.done
             current_metric = world.performance_metric
-            episode_metrics_current.append(current_metric)
+            episode_steps += 1
 
             # --- Visualization ---
-            # (Code unchanged)
             if eval_config.render and vis_available:
                 try:
-                    fname = f"ppo_{'rnn' if agent.use_rnn else 'mlp'}_eval_ep{episode+1}_frame_{step+1:03d}.png"
+                    fname = f"ppo_{'rnn' if agent.use_rnn else 'mlp'}_eval_{policy_mode.lower()}_seed{seed_to_use}_ep{episode+1}_frame_{step+1:03d}.png"
                     frame_file = visualize_world(world, vis_config, filename=fname)
                     if frame_file and os.path.exists(frame_file): episode_frames.append(frame_file)
                 except Exception as e: print(f"Warn: Vis failed step {step+1} ep {episode+1}. E: {e}")
 
             state = next_state # Update state dict for next step
+            actor_hxs = next_actor_hxs # Update hidden states
+            critic_hxs = next_critic_hxs
 
-            # --- Update hidden states for next step ---
-            actor_hxs = next_actor_hxs
-            # critic_hxs doesn't strictly need updating in eval, but can pass next_critic_hxs if desired
+            episode_reward_sum += reward # Accumulate the reward
 
             if done:
                 break
 
         # --- Episode End ---
-        # (Code unchanged)
         final_metric = world.performance_metric
-        eval_rewards.append(episode_reward) # Reward is 0 in eval, maybe track metric instead?
-        eval_metrics.append(final_metric)
+        eval_rewards.append(episode_reward_sum) # Append accumulated reward
+        eval_final_metrics.append(final_metric) # Append final metric
 
         success = final_metric >= world_config.success_metric_threshold
         if success: success_count += 1
         status = "Success!" if success else "Failure."
-        print(f"  Ep {episode+1}/{eval_config.num_episodes} (Seed:{world.current_seed}): Steps={world.current_step}, Terminated={world.done}, Final Metric: {final_metric:.3f}. {status}")
+        # Log both accumulated reward and final metric for this eval episode
+        print(f"  Ep {episode+1}/{num_eval_episodes} (Seed:{seed_to_use}): Steps={episode_steps}, Terminated={world.done}, Final Metric: {final_metric:.3f}, Accumulated Reward: {episode_reward_sum:.2f}. {status}")
 
         # --- GIF Saving ---
-        # (Code unchanged)
         if eval_config.render and vis_available and episode_frames and save_gif:
-            gif_filename = f"ppo_{'rnn' if agent.use_rnn else 'mlp'}_mapping_eval_episode_{episode+1}_seed{world.current_seed}.gif"
+            gif_filename = f"ppo_{'rnn' if agent.use_rnn else 'mlp'}_mapping_eval_{policy_mode.lower()}_episode_{episode+1}_seed{seed_to_use}.gif"
             try:
-                print(f"  Saving GIF for PPO episode {episode+1} with {len(episode_frames)} frames...")
+                print(f"  Saving GIF for PPO episode {episode+1} ({policy_mode}) with {len(episode_frames)} frames...")
                 gif_path = save_gif(output_filename=gif_filename, vis_config=vis_config, frame_paths=episode_frames, delete_frames=vis_config.delete_frames_after_gif)
                 if gif_path: all_episode_gif_paths.append(gif_path)
             except Exception as e: print(f"  Warn: Failed GIF save ep {episode+1}. E: {e}")
 
 
-    # --- Set Agent and Normalizer back to Training Mode ---
+    # --- Set Agent back to Training Mode (Good practice, though not strictly necessary if not training further) ---
     agent.actor.train()
     agent.critic.train()
     if agent.use_state_normalization and agent.state_normalizer:
         agent.state_normalizer.train()
 
     # --- Evaluation Summary ---
-    # (Code unchanged)
-    avg_eval_reward = np.mean(eval_rewards) if eval_rewards else 0.0
+    avg_eval_reward = np.mean(eval_rewards) if eval_rewards else 0.0 # Avg accumulated reward
     std_eval_reward = np.std(eval_rewards) if eval_rewards else 0.0
-    avg_eval_metric = np.mean(eval_metrics) if eval_metrics else 0.0
-    std_eval_metric = np.std(eval_metrics) if eval_metrics else 0.0
-    success_rate = success_count / eval_config.num_episodes if eval_config.num_episodes > 0 else 0.0
+    avg_eval_metric = np.mean(eval_final_metrics) if eval_final_metrics else 0.0 # Avg final metric
+    std_eval_metric = np.std(eval_final_metrics) if eval_final_metrics else 0.0
+    success_rate = success_count / num_eval_episodes if num_eval_episodes > 0 else 0.0
 
-    print(f"\n--- PPO {'RNN' if agent.use_rnn else 'MLP'} Evaluation Summary ---")
-    print(f"Episodes: {eval_config.num_episodes}")
+    print(f"\n--- PPO {'RNN' if agent.use_rnn else 'MLP'} Evaluation Summary ({policy_mode} Policy) ---")
+    print(f"Episodes: {num_eval_episodes}")
     print(f"Average Final Metric (Point Inclusion): {avg_eval_metric:.3f} +/- {std_eval_metric:.3f}")
-    print(f"Success Rate (Metric >= {world_config.success_metric_threshold:.2f}): {success_rate:.2%} ({success_count}/{eval_config.num_episodes})")
-    print(f"Average Episode Reward: {avg_eval_reward:.3f} +/- {std_eval_reward:.3f}")
+    print(f"Success Rate (Metric >= {world_config.success_metric_threshold:.2f}): {success_rate:.2%} ({success_count}/{num_eval_episodes})")
+    print(f"Average Accumulated Episode Reward: {avg_eval_reward:.3f} +/- {std_eval_reward:.3f}") # Clarified reward meaning
     if eval_config.render and vis_available and all_episode_gif_paths: print(f"GIFs saved to: '{os.path.abspath(vis_config.save_dir)}'")
     elif eval_config.render and not vis_available: print("Rendering enabled but libs not found.")
     elif not eval_config.render: print("Rendering disabled.")
-    print(f"--- End PPO {'RNN' if agent.use_rnn else 'MLP'} Evaluation ---\n")
+    print(f"--- End PPO {'RNN' if agent.use_rnn else 'MLP'} Evaluation ({policy_mode} Policy) ---\n")
 
-
+    # Return more info if needed
     return eval_rewards, success_rate, avg_eval_metric
