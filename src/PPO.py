@@ -6,7 +6,9 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Normal
 import time
-from collections import deque, defaultdict # Added defaultdict
+from collections import deque, defaultdict
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation 
 from tqdm import tqdm
 import random
 from typing import Tuple, Optional, Union, Dict, Any, List # Added List
@@ -714,7 +716,7 @@ class PPO:
             print(f"Warning: PPO model file not found: {path}. Skipping loading.")
             return
         print(f"Loading Recurrent PPO model from {path}...")
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
         loaded_use_rnn = checkpoint.get('use_rnn', False) # Default False if missing
         if 'use_rnn' in checkpoint and loaded_use_rnn != self.use_rnn:
@@ -1066,37 +1068,51 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
     return agent, episode_rewards
 
 
-# --- MODIFIED Evaluation Loop (evaluate_ppo) ---
-# Evaluation loop remains largely the same as it correctly handles hidden state propagation
 def evaluate_ppo(agent: PPO, config: DefaultConfig, model_path_for_eval: Optional[str] = None):
     eval_config = config.evaluation
     world_config = config.world
     vis_config = config.visualization
-    # Use stochastic policy during evaluation?
     use_stochastic_policy = eval_config.use_stochastic_policy_eval
 
-    # --- Conditional Visualization Import ---
-    # ... (unchanged) ...
     vis_available = False
-    visualize_world, reset_trajectories, save_gif = None, None, None
+    # visualize_world, reset_trajectories, save_gif are imported from visualization
+    
+    algo_name = f"ppo_{'rnn' if agent.use_rnn else 'mlp'}"
+
     if eval_config.render:
         try:
             from visualization import visualize_world, reset_trajectories, save_gif
-            import imageio.v2 as imageio # Keep import here
-            vis_available = True; print("Visualization enabled.")
+            vis_available = True
+            print("Visualization enabled.")
+
+            if vis_config.output_format == 'mp4':
+                try:
+                    animation.FFMpegWriterName = "ffmpeg"
+                    if not animation.writers.is_available(animation.FFMpegWriterName):
+                        print(f"FFMpeg writer not available for PPO. Install ffmpeg and add to PATH. Falling back to GIF.")
+                        current_vis_format = 'gif' # Fallback for this run
+                    else:
+                        print("PPO: Using FFMpeg for MP4 output.")
+                        current_vis_format = 'mp4'
+                except Exception as e:
+                    print(f"PPO: Error checking/setting FFMpeg writer: {e}. Falling back to GIF.")
+                    current_vis_format = 'gif'
+            else:
+                current_vis_format = 'gif'
         except ImportError:
-            print("Vis libs not found. Rendering disabled."); vis_available = False
-    else: vis_available = False; print("Rendering disabled by config.")
+            print("PPO: Visualization libraries (matplotlib/imageio/PIL) not found. Rendering disabled.")
+            vis_available = False
+            current_vis_format = 'none'
+    else:
+        print("PPO: Rendering disabled by config.")
+        vis_available = False
+        current_vis_format = 'none'
 
-
-    eval_rewards = [] # Store accumulated *training* rewards during eval episodes
-    eval_final_metrics = [] # Store final metric per episode
+    eval_rewards = []
+    eval_final_metrics = []
     success_count = 0
-    all_episode_gif_paths = []
+    all_episode_media_paths = []
 
-    # --- Set Agent and Normalizer to Evaluation Mode ---
-    # Networks remain in eval() mode to disable dropout/batchnorm updates.
-    # The 'evaluate' flag in select_action controls deterministic vs stochastic action selection.
     agent.actor.eval()
     agent.critic.eval()
     if agent.use_state_normalization and agent.state_normalizer:
@@ -1107,106 +1123,144 @@ def evaluate_ppo(agent: PPO, config: DefaultConfig, model_path_for_eval: Optiona
     if model_path_for_eval: print(f"Using model: {os.path.basename(model_path_for_eval)}")
 
     eval_seeds = world_config.seeds
-    # Ensure enough seeds for evaluation episodes
     num_eval_episodes = eval_config.num_episodes
+    # ... (seed generation/adjustment logic remains the same) ...
     if len(eval_seeds) < num_eval_episodes:
          print(f"Warning: Seed count ({len(eval_seeds)}) < num_episodes ({num_eval_episodes}). Generating additional seeds.")
          eval_seeds.extend([random.randint(0, 2**32 - 1) for _ in range(num_eval_episodes - len(eval_seeds))])
-    eval_seeds_to_use = eval_seeds[:num_eval_episodes] # Use only the required number
+    eval_seeds_to_use = eval_seeds[:num_eval_episodes]
 
     world = World(world_config=world_config)
 
     for episode in range(num_eval_episodes):
-        # Use the specific seed for this evaluation episode
         seed_to_use = eval_seeds_to_use[episode]
-        state = world.reset(seed=seed_to_use) # Get state dict
-        episode_reward_sum = 0.0 # Accumulate reward like in training
-        episode_frames = []
-        episode_steps = 0 # Track steps in this eval episode
+        state = world.reset(seed=seed_to_use)
+        episode_reward_sum = 0.0
+        episode_steps = 0
 
-        # --- Initialize hidden states for RNN ---
         actor_hxs, critic_hxs = None, None
         if agent.use_rnn:
             actor_hxs = agent.actor.get_initial_hidden_state(1, agent.device)
             critic_hxs = agent.critic.get_initial_hidden_state(1, agent.device)
 
-        # --- Visualization Setup ---
+        fig, ax = None, None
+        writer_mp4 = None # Explicitly for MP4 writer
+        episode_png_frames = [] # For GIF mode
+
         if eval_config.render and vis_available:
             os.makedirs(vis_config.save_dir, exist_ok=True)
             if reset_trajectories: reset_trajectories()
+            
+            fig, ax = plt.subplots(figsize=vis_config.figure_size)
+            
+            # Determine format for *this* episode, in case of FFMpeg setup failure
+            this_episode_format = current_vis_format 
+
+            if this_episode_format == 'mp4':
+                FFMpegWriter_cls = animation.writers['ffmpeg']
+                metadata = dict(title=f'{algo_name.upper()} Eval Ep {episode+1} Seed {seed_to_use}', artist='Matplotlib')
+                _writer_instance = FFMpegWriter_cls(fps=vis_config.video_fps, metadata=metadata)
+                
+                media_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_seed{seed_to_use}.mp4"
+                media_path = os.path.join(vis_config.save_dir, media_filename)
+                try:
+                    _writer_instance.setup(fig, media_path, dpi=100)
+                    writer_mp4 = _writer_instance
+                except Exception as e:
+                    print(f"PPO: Error setting up FFMpegWriter for {media_path}: {e}. Falling back to GIF for this episode.")
+                    this_episode_format = 'gif' # Fallback for this episode
+                    # writer_mp4 remains None
+            
+            # Initial frame visualization (for both GIF and MP4)
             try:
-                fname = f"ppo_{'rnn' if agent.use_rnn else 'mlp'}_eval_{policy_mode.lower()}_seed{seed_to_use}_ep{episode+1}_frame_000_initial.png"
-                initial_frame_file = visualize_world(world, vis_config, filename=fname)
-                if initial_frame_file and os.path.exists(initial_frame_file): episode_frames.append(initial_frame_file)
-            except Exception as e: print(f"Warn: Vis failed init state ep {episode+1}. E: {e}")
+                visualize_world(world, vis_config, fig, ax)
+                if writer_mp4 and this_episode_format == 'mp4':
+                    writer_mp4.grab_frame()
+                elif this_episode_format == 'gif':
+                    png_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_frame_000_initial.png"
+                    png_path = os.path.join(vis_config.save_dir, png_filename)
+                    fig.savefig(png_path)
+                    if os.path.exists(png_path): episode_png_frames.append(png_path)
+            except Exception as e: 
+                print(f"PPO: Warn: Vis failed for initial state ep {episode+1}. E: {e}")
 
 
         for step in range(eval_config.max_steps):
-            # Select action using hidden states
-            # evaluate=True -> deterministic (mean)
-            # evaluate=False -> stochastic (sample)
             action_normalized, _, _, next_actor_hxs, next_critic_hxs = agent.select_action(
-                state, # Pass the state dict (incl basic_state with heading)
+                state,
                 actor_hidden_state=actor_hxs,
                 critic_hidden_state=critic_hxs,
-                evaluate=(not use_stochastic_policy) # Pass True for deterministic, False for stochastic
+                evaluate=(not use_stochastic_policy)
             )
-
-            # Step the world using training=False BUT reward calculation is always done inside world.step
-            next_state = world.step(action_normalized, training=False, terminal_step=(step == eval_config.max_steps - 1))
-            reward = world.reward # Get the reward calculated (terminal bonuses/penalties are gated by training=True in world.step)
+            next_state_dict = world.step(action_normalized, training=False, terminal_step=(step == eval_config.max_steps - 1))
+            reward = world.reward
             done = world.done
-            current_metric = world.performance_metric
             episode_steps += 1
 
-            # --- Visualization ---
-            if eval_config.render and vis_available:
+            if eval_config.render and vis_available and fig is not None:
+                this_episode_format_render_step = current_vis_format
+                if writer_mp4 is None and this_episode_format_render_step == 'mp4': # Check if FFMpeg failed setup
+                     this_episode_format_render_step = 'gif'
+
                 try:
-                    fname = f"ppo_{'rnn' if agent.use_rnn else 'mlp'}_eval_{policy_mode.lower()}_seed{seed_to_use}_ep{episode+1}_frame_{step+1:03d}.png"
-                    frame_file = visualize_world(world, vis_config, filename=fname)
-                    if frame_file and os.path.exists(frame_file): episode_frames.append(frame_file)
-                except Exception as e: print(f"Warn: Vis failed step {step+1} ep {episode+1}. E: {e}")
+                    visualize_world(world, vis_config, fig, ax)
+                    if writer_mp4 and this_episode_format_render_step == 'mp4':
+                        writer_mp4.grab_frame()
+                    elif this_episode_format_render_step == 'gif':
+                        png_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_frame_{step+1:03d}.png"
+                        png_path = os.path.join(vis_config.save_dir, png_filename)
+                        fig.savefig(png_path)
+                        if os.path.exists(png_path): episode_png_frames.append(png_path)
+                except Exception as e: 
+                    print(f"PPO: Warn: Vis failed step {step+1} ep {episode+1}. E: {e}")
 
-            state = next_state # Update state dict for next step
-            actor_hxs = next_actor_hxs # Update hidden states
+            state = next_state_dict
+            actor_hxs = next_actor_hxs
             critic_hxs = next_critic_hxs
+            episode_reward_sum += reward
+            if done: break
 
-            episode_reward_sum += reward # Accumulate the reward
+        # --- Episode End & Media Saving ---
+        if eval_config.render and vis_available:
+            this_episode_format_finish = current_vis_format
+            if writer_mp4 is None and this_episode_format_finish == 'mp4':
+                 this_episode_format_finish = 'gif'
 
-            if done:
-                break
 
-        # --- Episode End ---
+            if writer_mp4 and this_episode_format_finish == 'mp4':
+                try:
+                    writer_mp4.finish()
+                    # media_path was defined when writer_mp4 was set up
+                    print(f"  PPO: MP4 video saved: {media_path}") 
+                    all_episode_media_paths.append(media_path)
+                except Exception as e:
+                    print(f"  PPO: Error finishing MP4 for ep {episode+1}: {e}")
+            elif this_episode_format_finish == 'gif' and episode_png_frames:
+                gif_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_seed{seed_to_use}.gif"
+                print(f"  PPO: Saving GIF for episode {episode+1} ({policy_mode}) with {len(episode_png_frames)} frames...")
+                gif_path = save_gif(output_filename=gif_filename, vis_config=vis_config, frame_paths=episode_png_frames)
+                if gif_path: all_episode_media_paths.append(gif_path)
+            
+            if fig is not None:
+                plt.close(fig)
+
         final_metric = world.performance_metric
-        eval_rewards.append(episode_reward_sum) # Append accumulated reward
-        eval_final_metrics.append(final_metric) # Append final metric
+        eval_rewards.append(episode_reward_sum)
+        eval_final_metrics.append(final_metric)
 
         success = final_metric >= world_config.success_metric_threshold
         if success: success_count += 1
         status = "Success!" if success else "Failure."
-        # Log both accumulated reward and final metric for this eval episode
-        print(f"  Ep {episode+1}/{num_eval_episodes} (Seed:{seed_to_use}): Steps={episode_steps}, Terminated={world.done}, Final Metric: {final_metric:.3f}, Accumulated Reward: {episode_reward_sum:.2f}. {status}")
+        print(f"  PPO Ep {episode+1}/{num_eval_episodes} (Seed:{seed_to_use}): Steps={episode_steps}, Terminated={world.done}, Final Metric: {final_metric:.3f}, Accumulated Reward: {episode_reward_sum:.2f}. {status}")
 
-        # --- GIF Saving ---
-        if eval_config.render and vis_available and episode_frames and save_gif:
-            gif_filename = f"ppo_{'rnn' if agent.use_rnn else 'mlp'}_mapping_eval_{policy_mode.lower()}_episode_{episode+1}_seed{seed_to_use}.gif"
-            try:
-                print(f"  Saving GIF for PPO episode {episode+1} ({policy_mode}) with {len(episode_frames)} frames...")
-                gif_path = save_gif(output_filename=gif_filename, vis_config=vis_config, frame_paths=episode_frames, delete_frames=vis_config.delete_frames_after_gif)
-                if gif_path: all_episode_gif_paths.append(gif_path)
-            except Exception as e: print(f"  Warn: Failed GIF save ep {episode+1}. E: {e}")
-
-
-    # --- Set Agent back to Training Mode (Good practice, though not strictly necessary if not training further) ---
     agent.actor.train()
     agent.critic.train()
     if agent.use_state_normalization and agent.state_normalizer:
         agent.state_normalizer.train()
 
-    # --- Evaluation Summary ---
-    avg_eval_reward = np.mean(eval_rewards) if eval_rewards else 0.0 # Avg accumulated reward
+    avg_eval_reward = np.mean(eval_rewards) if eval_rewards else 0.0
     std_eval_reward = np.std(eval_rewards) if eval_rewards else 0.0
-    avg_eval_metric = np.mean(eval_final_metrics) if eval_final_metrics else 0.0 # Avg final metric
+    avg_eval_metric = np.mean(eval_final_metrics) if eval_final_metrics else 0.0
     std_eval_metric = np.std(eval_final_metrics) if eval_final_metrics else 0.0
     success_rate = success_count / num_eval_episodes if num_eval_episodes > 0 else 0.0
 
@@ -1214,11 +1268,10 @@ def evaluate_ppo(agent: PPO, config: DefaultConfig, model_path_for_eval: Optiona
     print(f"Episodes: {num_eval_episodes}")
     print(f"Average Final Metric (Point Inclusion): {avg_eval_metric:.3f} +/- {std_eval_metric:.3f}")
     print(f"Success Rate (Metric >= {world_config.success_metric_threshold:.2f}): {success_rate:.2%} ({success_count}/{num_eval_episodes})")
-    print(f"Average Accumulated Episode Reward: {avg_eval_reward:.3f} +/- {std_eval_reward:.3f}") # Clarified reward meaning
-    if eval_config.render and vis_available and all_episode_gif_paths: print(f"GIFs saved to: '{os.path.abspath(vis_config.save_dir)}'")
-    elif eval_config.render and not vis_available: print("Rendering enabled but libs not found.")
-    elif not eval_config.render: print("Rendering disabled.")
+    print(f"Average Accumulated Episode Reward: {avg_eval_reward:.3f} +/- {std_eval_reward:.3f}")
+    if eval_config.render and vis_available and all_episode_media_paths: print(f"PPO: Media saved to: '{os.path.abspath(vis_config.save_dir)}'")
+    elif eval_config.render and not vis_available: print("PPO: Rendering was enabled but visualization libraries were not found.")
+    elif not eval_config.render: print("PPO: Rendering disabled.")
     print(f"--- End PPO {'RNN' if agent.use_rnn else 'MLP'} Evaluation ({policy_mode} Policy) ---\n")
 
-    # Return more info if needed
     return eval_rewards, success_rate, avg_eval_metric

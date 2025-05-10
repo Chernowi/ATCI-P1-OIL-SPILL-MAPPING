@@ -16,17 +16,17 @@ class SACConfig(BaseModel):
     hidden_dims: List[int] = Field([256, 256], description="List of hidden layer dimensions for MLP part")
     log_std_min: int = Field(-20, description="Minimum log std for action distribution")
     log_std_max: int = Field(1, description="Maximum log std for action distribution")
-    actor_lr: float = Field(3e-5, description="Actor learning rate")
-    critic_lr: float = Field(3e-5, description="Critic learning rate")
+    actor_lr: float = Field(5e-5, description="Actor learning rate")
+    critic_lr: float = Field(5e-5, description="Critic learning rate")
     gamma: float = Field(0.99, description="Discount factor")
     tau: float = Field(0.005, description="Target network update rate")
     alpha: float = Field(0.2, description="Temperature parameter (Initial value if auto-tuning)")
     auto_tune_alpha: bool = Field(True, description="Whether to auto-tune the alpha parameter")
-    use_rnn: bool = Field(False, description="Whether to use RNN layers in Actor/Critic") # DEFAULT FALSE
-    rnn_type: Literal['lstm', 'gru'] = Field('lstm', description="Type of RNN cell (Only used if use_rnn is True)")
-    rnn_hidden_size: int = Field(128, description="Hidden size of RNN layers (Only used if use_rnn is True)")
-    rnn_num_layers: int = Field(1, description="Number of RNN layers (Only used if use_rnn is True)")
-    use_state_normalization: bool = Field(True, description="Enable/disable state normalization using RunningMeanStd (operates on potentially already normalized coords/heading)")
+    use_rnn: bool = Field(True, description="Whether to use RNN layers in Actor/Critic") # DEFAULT FALSE
+    rnn_type: Literal['lstm', 'gru'] = Field('gru', description="Type of RNN cell (Only used if use_rnn is True)")
+    rnn_hidden_size: int = Field(128, description="Hidden size of RNN layers (Only used if use_rnn is True)") # Default for SAC RNN
+    rnn_num_layers: int = Field(1, description="Number of RNN layers (Only used if use_rnn is True)")     # Default for SAC RNN
+    use_state_normalization: bool = Field(False, description="Enable/disable state normalization using RunningMeanStd (operates on potentially already normalized coords/heading)")
     use_reward_normalization: bool = Field(True, description="Enable/disable reward normalization by batch std dev")
     # --- PER Parameters ---
     use_per: bool = Field(False, description="Enable Prioritized Experience Replay")
@@ -74,13 +74,13 @@ class PPOConfig(BaseModel):
     # --- RNN Parameters (NEW) ---
     use_rnn: bool = Field(True, description="Whether to use RNN layers in Actor/Critic")
     rnn_type: Literal['lstm', 'gru'] = Field('gru', description="Type of RNN cell (Only used if use_rnn is True)")
-    rnn_hidden_size: int = Field(32, description="Hidden size of RNN layers (Only used if use_rnn is True)")
+    rnn_hidden_size: int = Field(64, description="Hidden size of RNN layers (Only used if use_rnn is True)")
     rnn_num_layers: int = Field(4, description="Number of RNN layers (Only used if use_rnn is True)")
 
 # --- Replay Buffer Config (Unchanged) ---
 class ReplayBufferConfig(BaseModel):
     """Configuration for the replay buffer (SAC/TSAC)"""
-    capacity: int = Field(1500000, description="Maximum capacity of replay buffer (stores full trajectories)")
+    capacity: int = Field(3000000, description="Maximum capacity of replay buffer (stores full trajectories)")
     gamma: float = Field(0.99, description="Discount factor for returns")
 
 # --- Mapper Config (Simplified) ---
@@ -92,7 +92,7 @@ class MapperConfig(BaseModel):
 class TrainingConfig(BaseModel):
     """Configuration for training"""
     num_episodes: int = Field(30000, description="Number of episodes to train")
-    max_steps: int = Field(600, description="Maximum steps per episode (increased)")
+    max_steps: int = Field(350, description="Maximum steps per episode (increased)")
     batch_size: int = Field(512, description="Batch size for training (SAC/TSAC: trajectories, PPO: transitions)")
     save_interval: int = Field(200, description="Interval (in episodes) for saving models")
     log_frequency: int = Field(10, description="Frequency (in episodes) for logging to TensorBoard")
@@ -102,18 +102,18 @@ class TrainingConfig(BaseModel):
     gradient_steps: int = Field(1, description="How many gradient steps to perform when training frequency is met (SAC/TSAC)")
 
     # --- Early Stopping Config ---
-    enable_early_stopping: bool = Field(True, description="Enable early stopping based on average reward")
-    early_stopping_threshold: float = Field(60, description="Average reward threshold over the window to trigger early stopping")
-    early_stopping_window: int = Field(50, description="Number of recent episodes to average reward over for early stopping")
+    enable_early_stopping: bool = Field(False, description="Enable early stopping based on average reward")
+    early_stopping_threshold: float = Field(50, description="Average reward threshold over the window to trigger early stopping") # Default, will be overridden
+    early_stopping_window: int = Field(50, description="Number of recent episodes to average reward over for early stopping") # Default, will be overridden
 
 
 # --- Evaluation Config ---
 class EvaluationConfig(BaseModel):
     """Configuration for evaluation"""
-    num_episodes: int = Field(10, description="Number of episodes for evaluation")
-    max_steps: int = Field(500, description="Maximum steps per evaluation episode")
-    render: bool = Field(True, description="Whether to render the evaluation")
-    use_stochastic_policy_eval: bool = Field(False, description="Use stochastic policy (sample) during evaluation instead of deterministic (mean)") # NEW FIELD
+    num_episodes: int = Field(1, description="Number of episodes for evaluation")
+    max_steps: int = Field(350, description="Maximum steps per evaluation episode")
+    render: bool = Field(True, description="Whether to render the evaluation") # Changed default to False from image
+    use_stochastic_policy_eval: bool = Field(False, description="Use stochastic policy (sample) during evaluation instead of deterministic (mean)")
 
 # --- Pos/Vel/Randomization (Unchanged structure, but values relate to unnormalized world) ---
 class Position(BaseModel):
@@ -134,15 +134,18 @@ class VisualizationConfig(BaseModel):
     save_dir: str = Field("mapping_snapshots", description="Directory for saving visualizations")
     figure_size: tuple = Field((10, 10), description="Figure size for visualizations")
     max_trajectory_points: int = Field(200, description="Max trajectory points to display")
-    gif_frame_duration: float = Field(0.1, description="Duration of each frame in generated GIFs")
-    delete_frames_after_gif: bool = Field(True, description="Delete individual PNG frames after creating GIF")
+    
+    output_format: Literal['gif', 'mp4'] = Field('mp4', description="Output format for rendered episodes. 'mp4' requires ffmpeg.")
+    video_fps: int = Field(15, description="Frames per second for MP4 video or effective FPS for GIF.")
+    delete_png_frames: bool = Field(True, description="Delete individual PNG frames after creating GIF (GIF mode only).")
+
     sensor_marker_size: int = Field(10, description="Marker size for sensors")
     sensor_color_oil: str = Field("red", description="Color for sensors detecting oil")
     sensor_color_water: str = Field("blue", description="Color for sensors detecting water")
     plot_oil_points: bool = Field(True, description="Whether to plot true oil points (can be slow)")
     plot_water_points: bool = Field(False, description="Whether to plot true water points (can be slow)")
     point_marker_size: int = Field(2, description="Marker size for oil/water points")
-
+    
 # --- World Config ---
 class WorldConfig(BaseModel):
     """Configuration for the world"""
@@ -150,7 +153,7 @@ class WorldConfig(BaseModel):
     world_size: Tuple[float, float] = Field((125.0, 125.0), description="Dimensions (X, Y) of the world (unnormalized)")
     normalize_coords: bool = Field(True, description="Normalize agent coordinates to [0, 1] in the returned state")
 
-    agent_speed: float = Field(2, description="Constant speed of the agent (unnormalized units per dt)")
+    agent_speed: float = Field(3, description="Constant speed of the agent (unnormalized units per dt)")
     yaw_angle_range: Tuple[float, float] = Field((-math.pi / 6, math.pi / 6), description="Range of possible yaw angle changes per step [-max_change, max_change]")
     num_sensors: int = Field(5, description="Number of sensors around the agent")
     sensor_distance: float = Field(2.5, description="Distance of sensors from agent center (unnormalized)")
@@ -158,16 +161,16 @@ class WorldConfig(BaseModel):
 
     agent_initial_location: Position = Field(default_factory=lambda: Position(x=50, y=10), description="Initial agent position (unnormalized, used if randomize=False)")
     randomize_agent_initial_location: bool = Field(True, description="Randomize agent initial location?")
-    agent_randomization_ranges: RandomizationRange = Field(default_factory=lambda: RandomizationRange(x_range=(10.0, 90.0), y_range=(10.0, 90.0)), description="Ranges for agent location randomization (unnormalized)")
+    agent_randomization_ranges: RandomizationRange = Field(default_factory=lambda: RandomizationRange(x_range=(25.0, 100.0), y_range=(25.0, 100.0)), description="Ranges for agent location randomization (unnormalized)")
 
     num_oil_points: int = Field(200, description="Number of points representing the true oil spill")
     num_water_points: int = Field(400, description="Number of points representing non-spill areas")
-    oil_cluster_std_dev_range: Tuple[float, float] = Field((5.0, 15.0), description="Range for standard deviation of the initial oil point cluster (unnormalized)")
+    oil_cluster_std_dev_range: Tuple[float, float] = Field((8.0, 10.0), description="Range for standard deviation of the initial oil point cluster (unnormalized)")
     randomize_oil_cluster: bool = Field(True, description="Randomize oil cluster center and std dev at reset?")
-    oil_center_randomization_range: RandomizationRange = Field(default_factory=lambda: RandomizationRange(x_range=(25.0, 75.0), y_range=(25.0, 75.0)), description="Ranges for oil cluster center randomization (unnormalized)")
+    oil_center_randomization_range: RandomizationRange = Field(default_factory=lambda: RandomizationRange(x_range=(25.0, 100.0), y_range=(25.0, 100.0)), description="Ranges for oil cluster center randomization (unnormalized)")
     initial_oil_center: Position = Field(default_factory=lambda: Position(x=50, y=50), description="Initial oil cluster center (unnormalized, used if randomize=False)")
     initial_oil_std_dev: float = Field(10.0, description="Initial oil cluster std dev (unnormalized, used if randomize=False)")
-    min_initial_separation_distance: float = Field(35.0, description="Minimum required distance between agent's start location and oil cluster center at reset.")
+    min_initial_separation_distance: float = Field(50.0, description="Minimum required distance between agent's start location and oil cluster center at reset.")
 
     trajectory_length: int = Field(10, description="Number of steps (N) included in the trajectory state")
     trajectory_feature_dim: int = Field(CORE_STATE_DIM + CORE_ACTION_DIM + TRAJECTORY_REWARD_DIM, description="Dimension of features per step in trajectory state (normalized_state_incl_heading + prev_action + prev_reward)")
@@ -176,15 +179,15 @@ class WorldConfig(BaseModel):
     terminate_on_success: bool = Field(True, description="Terminate episode immediately upon reaching success threshold?")
     terminate_out_of_bounds: bool = Field(True, description="Terminate episode if agent goes out of world bounds?")
 
-    metric_improvement_scale: float = Field(30.0, description="Scaling factor for performance metric *improvement* reward")
-    step_penalty: float = Field(0.01, description="Penalty subtracted each step to encourage speed")
-    new_oil_detection_bonus: float = Field(0, description="Bonus for *any* sensor detecting oil *when it previously didn't*")
+    metric_improvement_scale: float = Field(50.0, description="Scaling factor for performance metric *improvement* reward")
+    step_penalty: float = Field(0, description="Penalty subtracted each step to encourage speed")
+    new_oil_detection_bonus: float = Field(0.0, description="Bonus for *any* sensor detecting oil *when it previously didn't*")
     out_of_bounds_penalty: float = Field(20.0, description="Penalty applied when agent goes out of bounds.")
-    success_bonus: float = Field(25.0, description="Bonus reward for reaching success_metric_threshold")
-    uninitialized_mapper_penalty: float = Field(0.0005, description="Penalty applied if the mapper hasn't produced a valid estimate yet")
+    success_bonus: float = Field(55.0, description="Bonus reward for reaching success_metric_threshold")
+    uninitialized_mapper_penalty: float = Field(0, description="Penalty applied if the mapper hasn't produced a valid estimate yet")
 
     mapper_config: MapperConfig = Field(default_factory=MapperConfig, description="Configuration for the mapper")
-    seeds: List[int] = Field([16,23,42], description="List of seeds used for environment generation during evaluation/specific resets.")
+    seeds: List[int] = Field([], description="List of seeds used for environment generation during evaluation/specific resets.")
 
 
 class DefaultConfig(BaseModel):
@@ -210,62 +213,58 @@ class DefaultConfig(BaseModel):
 # --- Default Mapping (SAC MLP) ---
 default_mapping_config = DefaultConfig()
 default_mapping_config.algorithm = "sac"
-default_mapping_config.training.models_dir = "models/sac_pointcloud/"
-# Example: Enabling early stopping for this config
-# default_mapping_config.training.enable_early_stopping = True
-# default_mapping_config.training.early_stopping_threshold = 180.0
-# default_mapping_config.training.early_stopping_window = 50
+default_mapping_config.sac.use_rnn = False # Explicitly MLP
+default_mapping_config.training.models_dir = "models/sac_mlp_pointcloud/"
 
 
-# --- SAC RNN Mapping ---
+# --- SAC RNN Mapping (Initial/Scratch Config) ---
 sac_rnn_config = DefaultConfig()
-sac_rnn_config.sac.use_rnn = True # Enable RNN in SAC
-sac_rnn_config.algorithm = "sac" # Still SAC algorithm overall
-sac_rnn_config.training.models_dir = "models/sac_rnn_pointcloud/"
 
 
-# --- PPO MLP Mapping --- (Clarified name)
-ppo_mapping_config = DefaultConfig()
-ppo_mapping_config.algorithm = "ppo"
-ppo_mapping_config.ppo.use_rnn = False # Explicitly disable RNN
-ppo_mapping_config.training.models_dir = "models/ppo_mlp_pointcloud/" # Changed directory
-# Example: Enabling early stopping for PPO
-# ppo_mapping_config.training.enable_early_stopping = True
-# ppo_mapping_config.training.early_stopping_threshold = 100.0 # Threshold might differ
+# --- PPO MLP Mapping ---
+ppo_mlp_mapping_config = DefaultConfig()
+ppo_mlp_mapping_config.algorithm = "ppo"
+ppo_mlp_mapping_config.ppo.use_rnn = False
+ppo_mlp_mapping_config.training.models_dir = "models/ppo_mlp_pointcloud/"
+ppo_mlp_mapping_config.world.step_penalty = 0.05 # Matches image
 
-# --- PPO RNN Mapping --- (NEW)
+# --- PPO RNN Mapping ---
 ppo_rnn_mapping_config = DefaultConfig()
 ppo_rnn_mapping_config.algorithm = "ppo"
-ppo_rnn_mapping_config.ppo.use_rnn = True # Enable RNN in PPO
-ppo_rnn_mapping_config.training.models_dir = "models/ppo_rnn_pointcloud/" # New directory
-# Tune RNN hyperparams if needed
-# ppo_rnn_mapping_config.ppo.rnn_hidden_size = 64
-# ppo_rnn_mapping_config.ppo.rnn_num_layers = 2
-# ppo_rnn_mapping_config.ppo.rnn_type = 'gru'
+ppo_rnn_mapping_config.ppo.use_rnn = True
+ppo_rnn_mapping_config.ppo.rnn_type = "gru"
+ppo_rnn_mapping_config.ppo.rnn_hidden_size = 64
+ppo_rnn_mapping_config.ppo.rnn_num_layers = 4
+ppo_rnn_mapping_config.training.models_dir = "models/ppo_rnn_pointcloud/"
+ppo_rnn_mapping_config.world.step_penalty = 0.05 # Matches image
 
 
 # --- TSAC Mapping ---
 tsac_mapping_config = DefaultConfig()
 tsac_mapping_config.algorithm = "tsac"
 tsac_mapping_config.training.models_dir = "models/tsac_pointcloud/"
+# TSAC specific SAC params are inside TSACConfig
+tsac_mapping_config.world.step_penalty = 0.05 # Matches image
 
-# --- Sparse Reward Mapping (Base SAC) --- (NEW)
+
+# --- Sparse Reward Mapping (Base SAC MLP) ---
 sparse_reward_config = DefaultConfig()
-sparse_reward_config.algorithm = "sac" # Use SAC as base
-sparse_reward_config.world.metric_improvement_scale = 0.0 # No improvement reward
-sparse_reward_config.world.new_oil_detection_bonus = 0.0 # No bonus for new oil detection
-sparse_reward_config.world.uninitialized_mapper_penalty = 0.0 # No penalty for uninitialized mapper
-# Keep step penalty and success bonus for minimal guidance
-sparse_reward_config.training.models_dir = "models/sac_sparse_reward/" # Directory for sparse reward model
+sparse_reward_config.algorithm = "sac"
+sparse_reward_config.sac.use_rnn = False # MLP base
+sparse_reward_config.world.metric_improvement_scale = 0.0
+sparse_reward_config.world.new_oil_detection_bonus = 0.0
+sparse_reward_config.world.uninitialized_mapper_penalty = 0.0
+sparse_reward_config.training.models_dir = "models/sac_sparse_reward_mlp/"
+sparse_reward_config.world.step_penalty = 0.05 # Matches image
 
 
 # Dictionary to access configurations by name
 CONFIGS: Dict[str, DefaultConfig] = {
-    "default_mapping": default_mapping_config,
-    "sac_rnn_mapping": sac_rnn_config,
-    "ppo_mapping": ppo_mapping_config, # Kept for clarity, points to MLP version
-    "ppo_mlp_mapping": ppo_mapping_config, # Explicit MLP PPO config
-    "ppo_rnn_mapping": ppo_rnn_mapping_config, # New PPO RNN config
+    "default_mapping": default_mapping_config, # SAC MLP
+    "sac_rnn_mapping": sac_rnn_config,         # SAC RNN from scratch
+    "ppo_mapping": ppo_mlp_mapping_config,     # Alias for PPO MLP
+    "ppo_mlp_mapping": ppo_mlp_mapping_config,
+    "ppo_rnn_mapping": ppo_rnn_mapping_config,
     "tsac_mapping": tsac_mapping_config,
-    "sac_sparse_reward": sparse_reward_config, # New sparse reward config
+    "sac_sparse_reward": sparse_reward_config, # SAC MLP Sparse
 }

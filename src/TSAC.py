@@ -8,6 +8,8 @@ from torch.distributions import Normal
 import random
 import time
 import math
+import matplotlib.pyplot as plt 
+import matplotlib.animation as animation 
 from collections import deque
 from tqdm import tqdm
 
@@ -713,7 +715,7 @@ class TSAC:
             return
         print(f"Loading T-SAC model from {path}...")
         try:
-            checkpoint = torch.load(path, map_location=self.device)
+            checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
             self.actor.load_state_dict(checkpoint['actor_state_dict'])
             self.critic1.load_state_dict(checkpoint['critic1_state_dict'])
@@ -1030,85 +1032,163 @@ def train_tsac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluatio
     return agent, episode_rewards
 
 
-# --- Updated Evaluation Loop (evaluate_tsac) ---
-# Evaluation logic doesn't change, but agent instantiation needs to match
 def evaluate_tsac(agent: TSAC, config: DefaultConfig):
-    """Evaluates the trained T-SAC agent."""
-    # ... (Conditional Visualization Import - unchanged) ...
     eval_config = config.evaluation
     world_config = config.world
     vis_config = config.visualization
-    # Use stochastic policy during evaluation?
     use_stochastic_policy = eval_config.use_stochastic_policy_eval
 
     vis_available = False
-    visualize_world, reset_trajectories, save_gif = None, None, None
+    # visualize_world, reset_trajectories, save_gif are imported from visualization
+    
+    algo_name = "tsac"
+
     if eval_config.render:
         try:
             from visualization import visualize_world, reset_trajectories, save_gif
-            import imageio.v2 as imageio # Keep import here
-            vis_available = True; print("Visualization enabled.")
+            vis_available = True
+            print("Visualization enabled.")
+
+            if vis_config.output_format == 'mp4':
+                try:
+                    animation.FFMpegWriterName = "ffmpeg"
+                    if not animation.writers.is_available(animation.FFMpegWriterName):
+                        print(f"FFMpeg writer not available for T-SAC. Install ffmpeg and add to PATH. Falling back to GIF.")
+                        current_vis_format = 'gif' # Fallback for this run
+                    else:
+                        print("T-SAC: Using FFMpeg for MP4 output.")
+                        current_vis_format = 'mp4'
+                except Exception as e:
+                    print(f"T-SAC: Error checking/setting FFMpeg writer: {e}. Falling back to GIF.")
+                    current_vis_format = 'gif'
+            else:
+                current_vis_format = 'gif'
         except ImportError:
-            print("Vis libs not found. Rendering disabled."); vis_available = False
-    else: vis_available = False; print("Rendering disabled by config.")
+            print("T-SAC: Visualization libraries (matplotlib/imageio/PIL) not found. Rendering disabled.")
+            vis_available = False
+            current_vis_format = 'none'
+    else:
+        print("T-SAC: Rendering disabled by config.")
+        vis_available = False
+        current_vis_format = 'none'
+
 
     eval_rewards = []
     eval_metrics = []
     success_count = 0
-    all_episode_gif_paths = []
+    all_episode_media_paths = []
 
-    # --- Set Agent to Evaluation Mode ---
     agent.actor.eval(); agent.critic1.eval(); agent.critic2.eval()
     if agent.use_state_normalization and agent.state_normalizer:
         agent.state_normalizer.eval()
 
     policy_mode = "Stochastic" if use_stochastic_policy else "Deterministic"
     print(f"\nRunning T-SAC Evaluation ({policy_mode} Policy) for {eval_config.num_episodes} episodes...")
+    
     eval_seeds = world_config.seeds
-    if len(eval_seeds) != eval_config.num_episodes:
-         print(f"Warning: Number of evaluation seeds ({len(eval_seeds)}) doesn't match num_episodes ({eval_config.num_episodes}). Using first {eval_config.num_episodes} seeds or generating if needed.")
-         if len(eval_seeds) < eval_config.num_episodes:
-              extra_seeds_needed = eval_config.num_episodes - len(eval_seeds)
-              eval_seeds.extend([random.randint(0, 2**32 - 1) for _ in range(extra_seeds_needed)])
-         eval_seeds = eval_seeds[:eval_config.num_episodes]
+    num_eval_episodes = eval_config.num_episodes
+    # ... (seed generation/adjustment logic remains the same) ...
+    if len(eval_seeds) < num_eval_episodes:
+         print(f"Warning: Seed count ({len(eval_seeds)}) < num_episodes ({num_eval_episodes}). Generating additional seeds.")
+         eval_seeds.extend([random.randint(0, 2**32 - 1) for _ in range(num_eval_episodes - len(eval_seeds))])
+    eval_seeds_to_use = eval_seeds[:num_eval_episodes]
+
 
     world = World(world_config=world_config)
 
-    for episode in range(eval_config.num_episodes):
-        seed_to_use = eval_seeds[episode] if eval_seeds else None
-        state = world.reset(seed=seed_to_use) # state dict
+    for episode in range(num_eval_episodes):
+        seed_to_use = eval_seeds_to_use[episode] if eval_seeds else None
+        state = world.reset(seed=seed_to_use)
         episode_reward = 0
-        episode_frames = []
-        episode_metrics_current = []
+        
+        fig, ax = None, None
+        writer_mp4 = None # Explicitly for MP4 writer
+        episode_png_frames = [] # For GIF mode
 
         if eval_config.render and vis_available:
             os.makedirs(vis_config.save_dir, exist_ok=True)
             if reset_trajectories: reset_trajectories()
+            
+            fig, ax = plt.subplots(figsize=vis_config.figure_size)
+            
+            this_episode_format = current_vis_format
+
+            if this_episode_format == 'mp4':
+                FFMpegWriter_cls = animation.writers['ffmpeg']
+                metadata = dict(title=f'{algo_name.upper()} Eval Ep {episode+1} Seed {seed_to_use}', artist='Matplotlib')
+                _writer_instance = FFMpegWriter_cls(fps=vis_config.video_fps, metadata=metadata)
+                
+                media_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_seed{seed_to_use}.mp4"
+                media_path = os.path.join(vis_config.save_dir, media_filename)
+                try:
+                    _writer_instance.setup(fig, media_path, dpi=100)
+                    writer_mp4 = _writer_instance
+                except Exception as e:
+                    print(f"T-SAC: Error setting up FFMpegWriter for {media_path}: {e}. Falling back to GIF for this episode.")
+                    this_episode_format = 'gif'
+            
             try:
-                fname = f"tsac_{policy_mode.lower()}_eval_ep{episode+1}_frame_000_initial.png"
-                initial_frame_file = visualize_world(world, vis_config, filename=fname)
-                if initial_frame_file and os.path.exists(initial_frame_file): episode_frames.append(initial_frame_file)
-            except Exception as e: print(f"Warn: Vis failed init state ep {episode+1}. E: {e}")
+                visualize_world(world, vis_config, fig, ax)
+                if writer_mp4 and this_episode_format == 'mp4':
+                    writer_mp4.grab_frame()
+                elif this_episode_format == 'gif':
+                    png_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_frame_000_initial.png"
+                    png_path = os.path.join(vis_config.save_dir, png_filename)
+                    fig.savefig(png_path)
+                    if os.path.exists(png_path): episode_png_frames.append(png_path)
+            except Exception as e: 
+                print(f"T-SAC: Warn: Vis failed for initial state ep {episode+1}. E: {e}")
 
         for step in range(eval_config.max_steps):
-            # Select action: evaluate=True -> deterministic (mean), evaluate=False -> stochastic (sample)
             action_normalized = agent.select_action(state, evaluate=(not use_stochastic_policy))
-            # Step the world using training=False BUT reward calculation is always done inside world.step
             next_state = world.step(action_normalized, training=False, terminal_step=(step == eval_config.max_steps - 1))
-            reward = world.reward # Get the reward calculated
+            reward = world.reward
             done = world.done
             current_metric = world.performance_metric
-            episode_metrics_current.append(current_metric)
+            # episode_metrics_current.append(current_metric) # Not used for T-SAC summary directly
 
-            if eval_config.render and vis_available:
+            if eval_config.render and vis_available and fig is not None:
+                this_episode_format_render_step = current_vis_format
+                if writer_mp4 is None and this_episode_format_render_step == 'mp4':
+                     this_episode_format_render_step = 'gif'
+
                 try:
-                    fname = f"tsac_{policy_mode.lower()}_eval_ep{episode+1}_frame_{step+1:03d}.png"
-                    frame_file = visualize_world(world, vis_config, filename=fname)
-                    if frame_file and os.path.exists(frame_file): episode_frames.append(frame_file)
-                except Exception as e: print(f"Warn: Vis failed step {step+1} ep {episode+1}. E: {e}")
+                    visualize_world(world, vis_config, fig, ax)
+                    if writer_mp4 and this_episode_format_render_step == 'mp4':
+                        writer_mp4.grab_frame()
+                    elif this_episode_format_render_step == 'gif':
+                        png_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_frame_{step+1:03d}.png"
+                        png_path = os.path.join(vis_config.save_dir, png_filename)
+                        fig.savefig(png_path)
+                        if os.path.exists(png_path): episode_png_frames.append(png_path)
+                except Exception as e: 
+                    print(f"T-SAC: Warn: Vis failed step {step+1} ep {episode+1}. E: {e}")
 
             state = next_state
+            episode_reward += reward
             if done: break
+
+        # --- Episode End & Media Saving ---
+        if eval_config.render and vis_available:
+            this_episode_format_finish = current_vis_format
+            if writer_mp4 is None and this_episode_format_finish == 'mp4':
+                 this_episode_format_finish = 'gif'
+
+            if writer_mp4 and this_episode_format_finish == 'mp4':
+                try:
+                    writer_mp4.finish()
+                    print(f"  T-SAC: MP4 video saved: {media_path}")
+                    all_episode_media_paths.append(media_path)
+                except Exception as e:
+                    print(f"  T-SAC: Error finishing MP4 for ep {episode+1}: {e}")
+            elif this_episode_format_finish == 'gif' and episode_png_frames:
+                gif_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_seed{seed_to_use}.gif"
+                print(f"  T-SAC: Saving GIF for episode {episode+1} ({policy_mode}) with {len(episode_png_frames)} frames...")
+                gif_path = save_gif(output_filename=gif_filename, vis_config=vis_config, frame_paths=episode_png_frames)
+                if gif_path: all_episode_media_paths.append(gif_path)
+            
+            if fig is not None:
+                plt.close(fig)
 
         final_metric = world.performance_metric
         eval_rewards.append(episode_reward)
@@ -1117,17 +1197,8 @@ def evaluate_tsac(agent: TSAC, config: DefaultConfig):
         success = final_metric >= world_config.success_metric_threshold
         if success: success_count += 1
         status = "Success!" if success else "Failure."
-        print(f"  Ep {episode+1}/{eval_config.num_episodes} (Seed:{world.current_seed}): Steps={world.current_step}, Terminated={world.done}, Final Metric: {final_metric:.3f}, Accum Reward: {episode_reward:.2f}. {status}")
+        print(f"  T-SAC Ep {episode+1}/{num_eval_episodes} (Seed:{world.current_seed}): Steps={world.current_step}, Terminated={world.done}, Final Metric: {final_metric:.3f}, Accum Reward: {episode_reward:.2f}. {status}")
 
-        if eval_config.render and vis_available and episode_frames and save_gif:
-            gif_filename = f"tsac_mapping_eval_{policy_mode.lower()}_episode_{episode+1}_seed{world.current_seed}.gif"
-            try:
-                print(f"  Saving GIF for T-SAC episode {episode+1} ({policy_mode}) with {len(episode_frames)} frames...")
-                gif_path = save_gif(output_filename=gif_filename, vis_config=vis_config, frame_paths=episode_frames, delete_frames=vis_config.delete_frames_after_gif)
-                if gif_path: all_episode_gif_paths.append(gif_path)
-            except Exception as e: print(f"  Warn: Failed GIF save ep {episode+1}. E: {e}")
-
-    # --- Set Agent back to Training Mode ---
     agent.actor.train(); agent.critic1.train(); agent.critic2.train()
     if agent.use_state_normalization and agent.state_normalizer:
         agent.state_normalizer.train()
@@ -1136,16 +1207,16 @@ def evaluate_tsac(agent: TSAC, config: DefaultConfig):
     std_eval_reward = np.std(eval_rewards) if eval_rewards else 0.0
     avg_eval_metric = np.mean(eval_metrics) if eval_metrics else 0.0
     std_eval_metric = np.std(eval_metrics) if eval_metrics else 0.0
-    success_rate = success_count / eval_config.num_episodes if eval_config.num_episodes > 0 else 0.0
+    success_rate = success_count / num_eval_episodes if num_eval_episodes > 0 else 0.0
 
     print(f"\n--- T-SAC Evaluation Summary ({policy_mode} Policy) ---")
-    print(f"Episodes: {eval_config.num_episodes}")
+    print(f"Episodes: {num_eval_episodes}")
     print(f"Average Final Metric (Point Inclusion): {avg_eval_metric:.3f} +/- {std_eval_metric:.3f}")
-    print(f"Success Rate (Metric >= {world_config.success_metric_threshold:.2f}): {success_rate:.2%} ({success_count}/{eval_config.num_episodes})")
+    print(f"Success Rate (Metric >= {world_config.success_metric_threshold:.2f}): {success_rate:.2%} ({success_count}/{num_eval_episodes})")
     print(f"Average Accumulated Episode Reward: {avg_eval_reward:.3f} +/- {std_eval_reward:.3f}")
-    if eval_config.render and vis_available and all_episode_gif_paths: print(f"GIFs saved to: '{os.path.abspath(vis_config.save_dir)}'")
-    elif eval_config.render and not vis_available: print("Rendering was enabled but visualization libraries were not found.")
-    elif not eval_config.render: print("Rendering disabled.")
+    if eval_config.render and vis_available and all_episode_media_paths: print(f"T-SAC: Media saved to: '{os.path.abspath(vis_config.save_dir)}'")
+    elif eval_config.render and not vis_available: print("T-SAC: Rendering was enabled but visualization libraries were not found.")
+    elif not eval_config.render: print("T-SAC: Rendering disabled.")
     print(f"--- End T-SAC Evaluation ({policy_mode} Policy) ---\n")
 
     return eval_rewards, success_rate, avg_eval_metric
