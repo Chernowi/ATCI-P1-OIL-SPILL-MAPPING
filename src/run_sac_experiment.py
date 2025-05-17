@@ -4,7 +4,6 @@ import torch
 
 from SAC import SAC, evaluate_sac # evaluate_sac handles conditional visualization import
 from configs import CONFIGS, DefaultConfig
-# from visualization import reset_trajectories # Moved inside evaluate_sac
 
 def run_experiment(config_name: str, model_path: str, num_episodes: int, max_steps: int, render: bool):
     """
@@ -19,7 +18,7 @@ def run_experiment(config_name: str, model_path: str, num_episodes: int, max_ste
     # --- Ensure Algorithm is SAC in Config ---
     if config.algorithm != 'sac':
         print(f"Warning: Config '{config_name}' has algorithm '{config.algorithm}'. Forcing to 'sac' for this script.")
-        config.algorithm = 'sac' # This updates model paths etc.
+        config.algorithm = 'sac' 
 
     # Override evaluation parameters if provided
     if num_episodes is not None: config.evaluation.num_episodes = num_episodes; print(f"Overriding num_episodes: {num_episodes}")
@@ -30,20 +29,12 @@ def run_experiment(config_name: str, model_path: str, num_episodes: int, max_ste
     print(f"Using device: {device}")
 
     # --- Instantiate Agent ---
-    # SAC needs sac_config, world_config, device
+    # SAC needs sac_config, world_config, buffer_config, device
     agent = SAC(config=config.sac, world_config=config.world, buffer_config=config.replay_buffer, device=device)
 
     # --- Load Model ---
-    # Use the correct model directory from config
-    models_dir = config.training.models_dir
-    if not os.path.isabs(model_path) and not os.path.exists(model_path):
-        check_path = os.path.join(models_dir, model_path)
-        if os.path.exists(check_path):
-             model_path = check_path
-             print(f"Found model in default directory: {model_path}")
-        else:
-             raise FileNotFoundError(f"Model file not found: {model_path} or {check_path}")
-    elif not os.path.exists(model_path):
+    # model_path is now expected to be the full path to the .pt file.
+    if not os.path.exists(model_path):
          raise FileNotFoundError(f"Model file not found: {model_path}")
 
     print(f"Loading SAC model from {model_path}...")
@@ -51,22 +42,23 @@ def run_experiment(config_name: str, model_path: str, num_episodes: int, max_ste
 
     print(f"\nRunning experiment with SAC model {os.path.basename(model_path)}...")
     # evaluate_sac handles rendering internally based on config
-    evaluate_sac(agent=agent, config=config)
+    evaluate_sac(agent=agent, config=config) # Removed model_path_for_eval, evaluate_sac doesn't use it
 
     print(f"\nSAC Experiment complete.")
     if config.evaluation.render:
+         # Evaluation visualizations are saved based on config.visualization.save_dir
          print(f"Visualizations potentially saved to '{config.visualization.save_dir}' directory (if libraries were available).")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run evaluation experiment with a trained SAC model for oil spill mapping.")
     parser.add_argument(
-        "--config", "-c", type=str, default="default_mapping", # Default mapping config
-        help=f"Configuration name. Available: {list(CONFIGS.keys())}"
+        "--config", "-c", type=str, default="default_mapping", 
+        help=f"Configuration name to load agent architecture and other settings. Available: {list(CONFIGS.keys())}"
     )
     parser.add_argument(
-        "--model", "-m", type=str, default="sac_mapping_final.pt", # Default mapping filename
-        help="Path to trained SAC model checkpoint (relative to config's models_dir or absolute)."
+        "--model", "-m", type=str, required=True, 
+        help="Full path to the trained SAC model checkpoint (.pt file). E.g., 'experiments/default_mapping_sac_12345/models/sac_final.pt'."
     )
     parser.add_argument(
         "--episodes", "-e", type=int, default=None, help="Number of episodes (overrides config)."

@@ -11,15 +11,14 @@ from collections import deque
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from tqdm import tqdm
-import math # Added for potential use later, though not directly needed in this file now
+import math 
 
 # Local imports
-from world import World # Now the mapping world
-# Updated config imports
+from world import World 
 from configs import DefaultConfig, ReplayBufferConfig, SACConfig, WorldConfig, CORE_STATE_DIM
 from torch.utils.tensorboard import SummaryWriter
-from typing import Tuple, Optional, Dict, Any, Union
-from utils import RunningMeanStd # Normalization utility
+from typing import Tuple, Optional, Dict, Any, Union, List
+from utils import RunningMeanStd 
 
 # --- SumTree Class (for PER) ---
 class SumTree:
@@ -183,10 +182,10 @@ class PrioritizedReplayBuffer:
             weights /= weights.max() # Normalize weights
 
         except IndexError:
-            print(f"IndexError during PER sampling. data_indices: {data_indices}, current_size: {self._current_size}, len(memory): {len(self.memory)}")
+            # print(f"IndexError during PER sampling. data_indices: {data_indices}, current_size: {self._current_size}, len(memory): {len(self.memory)}")
             return None # Or handle error appropriately
         except Exception as e:
-            print(f"Error converting PER sampled batch: {e}")
+            # print(f"Error converting PER sampled batch: {e}")
             return None
 
         return batch_data, idxs, weights
@@ -243,7 +242,7 @@ class ReplayBuffer:
         try:
             batch = random.sample(self.buffer, batch_size)
         except ValueError:
-            print(f"Warning: ReplayBuffer sampling failed. len(buffer)={len(self.buffer)}, batch_size={batch_size}")
+            # print(f"Warning: ReplayBuffer sampling failed. len(buffer)={len(self.buffer)}, batch_size={batch_size}")
             return None
 
         # state/next_state are full trajectories (batch, N, feat_dim) - state part is normalized (incl heading)
@@ -258,11 +257,11 @@ class ReplayBuffer:
 
             # Check for NaNs after conversion (optional but good practice)
             if np.isnan(batch_data['state']).any() or np.isnan(batch_data['next_state']).any():
-                print("Warning: Sampled batch contains NaN values. Returning None.")
+                # print("Warning: Sampled batch contains NaN values. Returning None.")
                 return None
 
         except Exception as e:
-            print(f"Error converting sampled batch to numpy arrays: {e}")
+            # print(f"Error converting sampled batch to numpy arrays: {e}")
             return None
 
         return batch_data
@@ -324,7 +323,7 @@ class Actor(nn.Module):
              - MLP: (batch, state_dim) - normalized last basic state (incl heading)
         """
         next_hidden_state = None
-        if self.use_rnn:
+        if self.use_rnn and self.rnn:
             # RNN processing (input is already normalized basic state sequence incl heading)
             rnn_output, next_hidden_state = self.rnn(network_input, hidden_state)
             # Use the output corresponding to the last time step
@@ -738,6 +737,7 @@ class SAC:
 
     def save_model(self, path: str):
         print(f"Saving SAC model to {path}...")
+        os.makedirs(os.path.dirname(path), exist_ok=True) # Ensure directory exists
         save_dict = {
             'actor_state_dict': self.actor.state_dict(),
             'critic_state_dict': self.critic.state_dict(),
@@ -785,10 +785,9 @@ class SAC:
                     loaded_mean_shape = checkpoint['state_normalizer_state_dict']['mean'].shape
                     if loaded_mean_shape != self.state_normalizer.mean.shape:
                          print(f"Warning: Mismatch in loaded state normalizer shape ({loaded_mean_shape}) and current ({self.state_normalizer.mean.shape}). Reinitializing normalizer.")
-                         # Optionally re-initialize: self.state_normalizer = RunningMeanStd(shape=(self.state_dim,), device=self.device)
                     else:
                          self.state_normalizer.load_state_dict(checkpoint['state_normalizer_state_dict'])
-                         print(f"Loaded state normalizer statistics (dim={self.state_dim}).") # Updated print
+                         print(f"Loaded state normalizer statistics (dim={self.state_dim}).") 
                 except Exception as e: print(f"Warning: Failed to load state normalizer stats: {e}. Using initial values.")
             else: print("Warning: State normalizer stats not found in checkpoint, but normalization is enabled.")
 
@@ -832,7 +831,7 @@ class SAC:
 
         self.actor.train()
         self.critic.train()
-        self.critic_target.train() # Set target weights above. Eval mode doesn't hurt.
+        self.critic_target.train() 
         if self.use_state_normalization and self.state_normalizer:
             self.state_normalizer.train()
 
@@ -840,10 +839,10 @@ class SAC:
 
 
 # --- Updated Training Loop (train_sac) ---
-def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation: bool = True):
+def train_sac(original_config_name: str, config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation: bool = True):
     sac_config = config.sac
     train_config = config.training
-    buffer_config = config.replay_buffer # Get buffer config
+    buffer_config = config.replay_buffer 
     world_config = config.world
     cuda_device = config.cuda_device
 
@@ -854,9 +853,34 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
     log_frequency_ep = train_config.log_frequency
     save_interval_ep = train_config.save_interval
 
+    # --- Experiment Directory Setup ---
+    timestamp = int(time.time())
+    experiment_folder_name = f"{original_config_name}_{config.algorithm}_{timestamp}"
+    base_experiments_dir = "experiments"
+    current_experiment_path = os.path.join(base_experiments_dir, experiment_folder_name)
+    
+    actual_tb_log_dir = os.path.join(current_experiment_path, "tensorboard")
+    actual_models_save_dir = os.path.join(current_experiment_path, "models")
+    
+    os.makedirs(current_experiment_path, exist_ok=True)
+    os.makedirs(actual_tb_log_dir, exist_ok=True)
+    os.makedirs(actual_models_save_dir, exist_ok=True)
+    print(f"SAC Experiment data will be saved in: {os.path.abspath(current_experiment_path)}")
+
+
+    # --- Config Saving ---
+    config_save_path = os.path.join(current_experiment_path, "config.json")
+    try:
+        with open(config_save_path, "w") as f:
+            f.write(config.model_dump_json(indent=2))
+        print(f"Configuration saved to: {config_save_path}")
+    except Exception as e: print(f"Error saving configuration: {e}")
+
+    writer = SummaryWriter(log_dir=actual_tb_log_dir)
+    # print(f"TensorBoard logs: {actual_tb_log_dir}") # Covered by experiment path print
+
     # --- Device Setup ---
     device = torch.device(cuda_device if torch.cuda.is_available() and cuda_device != 'cpu' else "cpu")
-    # ... (rest of device setup code is unchanged) ...
     if device.type == 'cuda' and cuda_device != 'cpu':
         try:
             if ':' in cuda_device:
@@ -873,86 +897,70 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                 device = torch.device("cpu")
                 print("SAC Training using CPU.")
     else:
-        device = torch.device("cpu") # Ensure device is 'cpu' if condition fails
+        device = torch.device("cpu") 
         print("SAC Training using CPU.")
 
-    # --- Logging and Config Saving ---
-    name_prefix = "sac_per_" if config.sac.use_per else "sac_"
-    name_suffix = "rnn_" if config.sac.use_rnn else ""
-    log_dir_name = f"{name_prefix}{name_suffix}pointcloud_{int(time.time())}"
-    log_dir = os.path.join("runs", log_dir_name)
-    os.makedirs(log_dir, exist_ok=True)
-
-    config_save_path = os.path.join(log_dir, "config.json")
-    try:
-        with open(config_save_path, "w") as f:
-            f.write(config.model_dump_json(indent=2))
-        print(f"Configuration saved to: {config_save_path}")
-    except Exception as e: print(f"Error saving configuration: {e}")
-
-    writer = SummaryWriter(log_dir=log_dir)
-    print(f"TensorBoard logs: {log_dir}")
-
     # --- Agent and Memory Initialization ---
-    # Pass buffer_config to SAC agent constructor
     agent = SAC(config=sac_config, world_config=world_config, buffer_config=buffer_config, device=device)
-    # Memory is now initialized inside the agent based on config.sac.use_per
     memory = agent.memory
-    os.makedirs(train_config.models_dir, exist_ok=True)
+    # os.makedirs(train_config.models_dir, exist_ok=True) # Superseded by actual_models_save_dir
 
     # --- Checkpoint Loading ---
-    model_files = [f for f in os.listdir(train_config.models_dir) if f.startswith("sac_") and f.endswith(".pt")]
+    model_prefix = "sac_" # SAC model filenames are simpler
     latest_model_path = None
-    if model_files:
-        try: latest_model_path = max([os.path.join(train_config.models_dir, f) for f in model_files], key=os.path.getmtime)
-        except Exception as e: print(f"Could not find latest model: {e}")
+    if os.path.exists(actual_models_save_dir):
+        model_files = [f for f in os.listdir(actual_models_save_dir) if f.startswith(model_prefix) and f.endswith(".pt")]
+        if model_files:
+            try: latest_model_path = max([os.path.join(actual_models_save_dir, f) for f in model_files], key=os.path.getmtime)
+            except Exception as e: print(f"Could not find latest SAC model in {actual_models_save_dir}: {e}")
 
-    total_steps = 0
+    total_steps = 0 # Environment steps, will be re-estimated if loading
     start_episode = 1
     if latest_model_path and os.path.exists(latest_model_path):
         print(f"\nResuming SAC training from: {latest_model_path}")
-        agent.load_model(latest_model_path) # Agent now loads PER state too
-        # Retrieve total_steps from loaded agent state
-        total_steps = agent.total_updates * train_freq # Approx total env steps
-        try: # Try parsing episode from filename for tqdm start
+        agent.load_model(latest_model_path) 
+        total_steps = agent.total_updates * train_freq 
+        try: 
             parts = os.path.basename(latest_model_path).split('_')
             ep_part = next((p for p in parts if p.startswith('ep')), None)
             if ep_part: start_episode = int(ep_part.replace('ep', '')) + 1
             print(f"Resuming at approx step {total_steps}, episode {start_episode}")
         except Exception as e: print(f"Warn: Could not parse ep from file: {e}. Starting fresh ep count."); start_episode = 1
     else:
-        print("\nStarting SAC training from scratch.")
+        print(f"\nStarting SAC training from scratch in {actual_models_save_dir}.")
 
     # Training Loop
     episode_rewards = []
-    all_losses = {'critic_loss': [], 'actor_loss': [], 'alpha': [], 'alpha_loss': [], 'beta': []} # Added beta
+    all_losses = {'critic_loss': [], 'actor_loss': [], 'alpha': [], 'alpha_loss': [], 'beta': []} 
     timing_metrics = { 'env_step_time': deque(maxlen=100), 'parameter_update_time': deque(maxlen=100) }
     world = World(world_config=world_config)
+    
+    _world_reset_for_keys = world.reset() # Get keys for reward_component_accumulator
     reward_component_accumulator = {k: [] for k in world.reward_components}
+    del _world_reset_for_keys
+
 
     pbar = tqdm(range(start_episode, train_config.num_episodes + 1),
                 desc="Training SAC Mapping", unit="episode", initial=start_episode-1, total=train_config.num_episodes)
 
-    env_steps_since_reset = 0 # Track steps for total_steps calculation more accurately
-    total_env_steps = 0 # Separate counter for env steps
+    total_env_steps = total_steps # Initialize total_env_steps from loaded checkpoint if any
 
     for episode in pbar:
-        state = world.reset() # state dict including basic_state and full_trajectory
+        state = world.reset() 
         episode_reward = 0
         episode_steps = 0
         actor_hidden_state = agent.actor.get_initial_hidden_state(batch_size=1, device=device) if agent.use_rnn else None
-        episode_losses_temp = {'critic_loss': [], 'actor_loss': [], 'alpha': [], 'alpha_loss': [], 'beta': []} # Added beta
+        episode_losses_temp = {'critic_loss': [], 'actor_loss': [], 'alpha': [], 'alpha_loss': [], 'beta': []} 
         updates_made_this_episode = 0
         episode_metrics = []
         episode_reward_components = {k: 0.0 for k in reward_component_accumulator}
 
         for step_in_episode in range(train_config.max_steps):
             action_normalized, next_actor_hidden_state = agent.select_action(
-                state, actor_hidden_state=actor_hidden_state, evaluate=False # Always sample during training
+                state, actor_hidden_state=actor_hidden_state, evaluate=False 
             )
 
             step_start_time = time.time()
-            # Reward calculation happens inside world.step regardless of training flag
             next_state = world.step(action_normalized, training=True, terminal_step=(step_in_episode == train_config.max_steps - 1))
             timing_metrics['env_step_time'].append(time.time() - step_start_time)
 
@@ -963,19 +971,17 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
             for key, value in world.reward_components.items():
                  if key in episode_reward_components: episode_reward_components[key] += value
 
-            # Push uses agent's memory (which could be PER or standard)
             agent.memory.push(state, action_normalized, reward, next_state, done)
 
             state = next_state
             if agent.use_rnn: actor_hidden_state = next_actor_hidden_state
             episode_reward += reward
             episode_steps += 1
-            total_env_steps += 1 # Increment environment step counter
-            episode_metrics.append(current_metric) # Store metric at each step
+            total_env_steps += 1 
+            episode_metrics.append(current_metric) 
 
             if total_env_steps >= learning_starts and total_env_steps % train_freq == 0:
                 for _ in range(gradient_steps):
-                    # Pass batch_size to update_parameters
                     update_start_time = time.time()
                     losses = agent.update_parameters(batch_size)
                     update_time = time.time() - update_start_time
@@ -983,12 +989,11 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                         timing_metrics['parameter_update_time'].append(update_time)
                         if not any(np.isnan(v) for v in losses.values() if isinstance(v, (float, np.float64))):
                             for key, val in losses.items():
-                                 if isinstance(val, (float, np.float64)):
+                                 if isinstance(val, (float, np.float64)): # Check val type
                                     episode_losses_temp[key].append(val)
                             updates_made_this_episode += 1
-                        else: print(f"INFO: Skipping SAC loss logging step {total_env_steps} due to NaN.")
-                    else: break # Stop gradient steps if update fails (e.g. buffer too small)
-
+                        else: pass # print(f"INFO: Skipping SAC loss logging step {total_env_steps} due to NaN.")
+                    else: break 
             if done: break
 
         # --- Logging (End of Episode) ---
@@ -1004,17 +1009,17 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
              if not np.isnan(avg_losses['actor_loss']): all_losses['actor_loss'].append(avg_losses['actor_loss'])
              if not np.isnan(avg_losses['alpha']): all_losses['alpha'].append(avg_losses['alpha'])
              if agent.auto_tune_alpha and not np.isnan(avg_losses['alpha_loss']): all_losses['alpha_loss'].append(avg_losses['alpha_loss'])
-             if agent.use_per and not np.isnan(avg_losses['beta']): all_losses['beta'].append(avg_losses['beta']) # Log beta
+             if agent.use_per and not np.isnan(avg_losses['beta']): all_losses['beta'].append(avg_losses['beta']) 
 
         if episode % log_frequency_ep == 0:
-            log_step = agent.total_updates # Log based on number of updates
+            log_step = agent.total_updates 
             if timing_metrics['env_step_time']: writer.add_scalar('Time/Environment_Step_ms_Avg100', np.mean(timing_metrics['env_step_time']) * 1000, log_step)
             if timing_metrics['parameter_update_time']: writer.add_scalar('Time/Parameter_Update_ms_Avg100', np.mean(timing_metrics['parameter_update_time']) * 1000, log_step)
 
             writer.add_scalar('Reward/Episode', episode_reward, log_step)
             writer.add_scalar('Steps/Episode', episode_steps, log_step)
-            writer.add_scalar('Progress/Total_Env_Steps', total_env_steps, episode) # Log env steps vs episode
-            writer.add_scalar('Progress/Total_Updates', agent.total_updates, log_step) # Log updates
+            writer.add_scalar('Progress/Total_Env_Steps', total_env_steps, episode) 
+            writer.add_scalar('Progress/Total_Updates', agent.total_updates, log_step) 
             writer.add_scalar('Progress/Buffer_Size', len(agent.memory), log_step)
             writer.add_scalar('Performance/Metric_AvgEp', avg_metric, log_step)
             writer.add_scalar('Performance/Metric_EndEp', world.performance_metric, log_step)
@@ -1025,30 +1030,33 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                 if not np.isnan(avg_losses['actor_loss']): writer.add_scalar('Loss/Actor_AvgEp', avg_losses['actor_loss'], log_step)
                 if agent.auto_tune_alpha and not np.isnan(avg_losses['alpha_loss']): writer.add_scalar('Loss/Alpha_AvgEp', avg_losses['alpha_loss'], log_step)
                 if not np.isnan(avg_losses['alpha']): writer.add_scalar('Params/Alpha', avg_losses['alpha'], log_step)
-                if agent.use_per and not np.isnan(avg_losses['beta']): writer.add_scalar('Params/PER_Beta', avg_losses['beta'], log_step) # Log beta
+                if agent.use_per and not np.isnan(avg_losses['beta']): writer.add_scalar('Params/PER_Beta', avg_losses['beta'], log_step) 
             else:
                  writer.add_scalar('Params/Alpha', agent.alpha, log_step)
                  if agent.use_per: writer.add_scalar('Params/PER_Beta', agent.memory.beta, log_step)
 
-            # Log accumulated reward components
-            if "total" in reward_component_accumulator: # Check if keys exist
+            if reward_component_accumulator:
+                avg_components_logged_this_interval = {}
                 for name, component_list in reward_component_accumulator.items():
-                    if component_list: # Only log if samples exist
-                         avg_component_value = np.mean(component_list)
-                         writer.add_scalar(f'RewardComponents_AvgEp/{name}', avg_component_value, log_step)
-                reward_component_accumulator = {k: [] for k in reward_component_accumulator} # Reset
+                    if component_list:
+                        valid_values = [v for v in component_list if not np.isnan(v)]
+                        if valid_values:
+                            avg_component_value = np.mean(valid_values)
+                            writer.add_scalar(f'RewardComponents_AvgEp/{name}', avg_component_value, log_step)
+                reward_component_accumulator = {k: [] for k in reward_component_accumulator}
+
 
             if agent.use_state_normalization and agent.state_normalizer and agent.state_normalizer.count > agent.state_normalizer.epsilon:
                 writer.add_scalar('Stats/Normalizer_Count', agent.state_normalizer.count.item(), log_step)
                 writer.add_scalar('Stats/Normalizer_Mean_Sensor0', agent.state_normalizer.mean[0].item(), log_step)
                 writer.add_scalar('Stats/Normalizer_Std_Sensor0', torch.sqrt(agent.state_normalizer.var[0].clamp(min=1e-8)).item(), log_step)
-                if agent.state_dim > 5: # Log X coord norm
+                if agent.state_dim > 5: 
                      writer.add_scalar('Stats/Normalizer_Mean_AgentXNorm', agent.state_normalizer.mean[5].item(), log_step)
                      writer.add_scalar('Stats/Normalizer_Std_AgentXNorm', torch.sqrt(agent.state_normalizer.var[5].clamp(min=1e-8)).item(), log_step)
-                if agent.state_dim > 6: # Log Y coord norm
+                if agent.state_dim > 6: 
                      writer.add_scalar('Stats/Normalizer_Mean_AgentYNorm', agent.state_normalizer.mean[6].item(), log_step)
                      writer.add_scalar('Stats/Normalizer_Std_AgentYNorm', torch.sqrt(agent.state_normalizer.var[6].clamp(min=1e-8)).item(), log_step)
-                if agent.state_dim > 7: # Log Heading norm
+                if agent.state_dim > 7: 
                      writer.add_scalar('Stats/Normalizer_Mean_AgentHeadingNorm', agent.state_normalizer.mean[7].item(), log_step)
                      writer.add_scalar('Stats/Normalizer_Std_AgentHeadingNorm', torch.sqrt(agent.state_normalizer.var[7].clamp(min=1e-8)).item(), log_step)
 
@@ -1057,7 +1065,7 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
             avg_reward_100 = np.mean(episode_rewards[-lookback:]) if episode_rewards else 0
             writer.add_scalar('Reward/Average_100', avg_reward_100, log_step)
 
-        if episode % 10 == 0: # Update progress bar less frequently
+        if episode % 10 == 0: 
             lookback = min(10, len(episode_rewards))
             avg_reward_10 = np.mean(episode_rewards[-lookback:]) if episode_rewards else 0
             pbar_postfix = {
@@ -1074,42 +1082,39 @@ def train_sac(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
 
 
         if episode % save_interval_ep == 0 and episode > 0:
-            # Save based on episode number and total updates
-            save_path = os.path.join(train_config.models_dir, f"sac_ep{episode}_updates{agent.total_updates}.pt")
+            save_path = os.path.join(actual_models_save_dir, f"sac_ep{episode}_updates{agent.total_updates}.pt")
             agent.save_model(save_path)
 
-        # --- Early Stopping Check --- ADDED BLOCK ---
         if train_config.enable_early_stopping and len(episode_rewards) >= train_config.early_stopping_window:
             avg_reward_window = np.mean(episode_rewards[-train_config.early_stopping_window:])
             if avg_reward_window >= train_config.early_stopping_threshold:
                 print(f"\nEarly stopping triggered at episode {episode}!")
                 print(f"Average reward over last {train_config.early_stopping_window} episodes ({avg_reward_window:.2f}) >= threshold ({train_config.early_stopping_threshold:.2f}).")
-                # Save final model before breaking
-                final_save_path_early = os.path.join(train_config.models_dir, f"sac_earlystop_ep{episode}_updates{agent.total_updates}.pt")
+                final_save_path_early = os.path.join(actual_models_save_dir, f"sac_earlystop_ep{episode}_updates{agent.total_updates}.pt")
                 agent.save_model(final_save_path_early)
                 print(f"Final model saved due to early stopping: {final_save_path_early}")
-                break # Exit the training loop
-        # --- END ADDED BLOCK ---
+                pbar.close()
+                writer.close()
+                return agent, episode_rewards, current_experiment_path 
 
 
-    # --- Modified code after the loop ---
     pbar.close()
     writer.close()
-    # Check if loop finished normally or broke early (final save might be redundant if stopped early)
-    if episode < train_config.num_episodes: # Indicates early stopping occurred
+    final_model_saved_path = None
+    if episode < train_config.num_episodes: 
         print(f"SAC Training finished early at episode {episode}. Total env steps: {total_env_steps}, Total updates: {agent.total_updates}")
-    else: # Training completed all episodes
+        if 'final_save_path_early' in locals(): final_model_saved_path = final_save_path_early
+    else: 
         print(f"SAC Training finished. Total env steps: {total_env_steps}, Total updates: {agent.total_updates}")
-        final_save_path = os.path.join(train_config.models_dir, f"sac_final_ep{train_config.num_episodes}_updates{agent.total_updates}.pt")
-        # Avoid saving again if already saved by early stopping
-        if not (train_config.enable_early_stopping and 'final_save_path_early' in locals()):
-             agent.save_model(final_save_path)
+        final_save_path = os.path.join(actual_models_save_dir, f"sac_final_ep{train_config.num_episodes}_updates{agent.total_updates}.pt")
+        agent.save_model(final_save_path)
+        final_model_saved_path = final_save_path
+    
+    if final_model_saved_path: print(f"Final model saved to: {final_model_saved_path}")
+    else: print("No final model saved (likely due to early exit without meeting early stop criteria).")
 
-    if run_evaluation:
-         print("\nStarting evaluation after training...")
-         evaluate_sac(agent=agent, config=config) # Pass full config
 
-    return agent, episode_rewards
+    return agent, episode_rewards, current_experiment_path
 
 
 def evaluate_sac(agent: SAC, config: DefaultConfig):
@@ -1119,13 +1124,8 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
     use_stochastic_policy = eval_config.use_stochastic_policy_eval
 
     vis_available = False
-    # visualize_world, reset_trajectories, save_gif are imported from visualization
-    # imageio is imported in visualization.py
     
-    # Determine algo_name for filenames (specific to each evaluate function)
     algo_name = "sac" 
-    # For PPO: algo_name = f"ppo_{'rnn' if agent.use_rnn else 'mlp'}"
-    # For TSAC: algo_name = "tsac"
 
     if eval_config.render:
         try:
@@ -1138,23 +1138,30 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
                     animation.FFMpegWriterName = "ffmpeg"
                     if not animation.writers.is_available(animation.FFMpegWriterName):
                         print(f"FFMpeg writer not available. Install ffmpeg and add to PATH. Falling back to GIF.")
-                        vis_config.output_format = 'gif' 
+                        current_vis_format = 'gif' 
                     else:
                         print("Using FFMpeg for MP4 output.")
+                        current_vis_format = 'mp4'
                 except Exception as e:
                     print(f"Error checking/setting FFMpeg writer: {e}. Falling back to GIF.")
-                    vis_config.output_format = 'gif'
+                    current_vis_format = 'gif'
+            else:
+                current_vis_format = 'gif'
+
         except ImportError:
             print("Visualization libraries (matplotlib/imageio/PIL) not found. Rendering disabled.")
             vis_available = False
+            current_vis_format = 'none'
     else:
         print("Rendering disabled by config.")
         vis_available = False
+        current_vis_format = 'none'
+
 
     eval_rewards = []
     eval_metrics = []
     success_count = 0
-    all_episode_media_paths = [] # Stores GIF or MP4 paths
+    all_episode_media_paths = [] 
 
     agent.actor.eval()
     agent.critic.eval()
@@ -1165,57 +1172,56 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
     print(f"\nRunning {algo_name.upper()} Evaluation ({policy_mode} Policy) for {eval_config.num_episodes} episodes...")
     
     eval_seeds = world_config.seeds
-    # ... (seed generation/adjustment logic remains the same) ...
-    if len(eval_seeds) != eval_config.num_episodes:
-         print(f"Warning: Number of evaluation seeds ({len(eval_seeds)}) doesn't match num_episodes ({eval_config.num_episodes}). Using first {eval_config.num_episodes} seeds or generating if needed.")
-         if len(eval_seeds) < eval_config.num_episodes:
-              extra_seeds_needed = eval_config.num_episodes - len(eval_seeds)
-              eval_seeds.extend([random.randint(0, 2**32 - 1) for _ in range(extra_seeds_needed)])
-         eval_seeds = eval_seeds[:eval_config.num_episodes]
+    num_eval_episodes = eval_config.num_episodes
+    if len(eval_seeds) < num_eval_episodes:
+         print(f"Warning: Number of evaluation seeds ({len(eval_seeds)}) < num_episodes ({num_eval_episodes}). Generating if needed.")
+         eval_seeds.extend([random.randint(0, 2**32 - 1) for _ in range(num_eval_episodes - len(eval_seeds))])
+    eval_seeds_to_use = eval_seeds[:num_eval_episodes]
 
 
     world = World(world_config=world_config)
 
-    for episode in range(eval_config.num_episodes):
-        seed_to_use = eval_seeds[episode] if eval_seeds else None
+    for episode in range(num_eval_episodes):
+        seed_to_use = eval_seeds_to_use[episode] if eval_seeds_to_use else None
         state = world.reset(seed=seed_to_use)
         episode_reward = 0
         
         actor_hidden_state = agent.actor.get_initial_hidden_state(batch_size=1, device=agent.device) if agent.use_rnn else None
-        episode_metrics_current = []
-
+        
         fig, ax = None, None
-        writer = None
-        episode_png_frames = [] # For GIF mode
+        writer_mp4 = None
+        episode_png_frames = [] 
 
         if eval_config.render and vis_available:
+            # Note: Evaluation media is saved based on vis_config.save_dir
             os.makedirs(vis_config.save_dir, exist_ok=True)
             if reset_trajectories: reset_trajectories()
             
             fig, ax = plt.subplots(figsize=vis_config.figure_size)
+            
+            this_episode_format = current_vis_format
 
-            if vis_config.output_format == 'mp4':
-                FFMpegWriter = animation.writers['ffmpeg']
+            if this_episode_format == 'mp4':
+                FFMpegWriter_cls = animation.writers['ffmpeg']
                 metadata = dict(title=f'{algo_name.upper()} Eval Ep {episode+1} Seed {seed_to_use}', artist='Matplotlib')
-                _writer = FFMpegWriter(fps=vis_config.video_fps, metadata=metadata)
+                _writer_instance = FFMpegWriter_cls(fps=vis_config.video_fps, metadata=metadata)
                 
                 media_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_seed{seed_to_use}.mp4"
                 media_path = os.path.join(vis_config.save_dir, media_filename)
                 try:
-                    _writer.setup(fig, media_path, dpi=100) # Use a reasonable DPI
-                    writer = _writer # Assign only if setup succeeds
+                    _writer_instance.setup(fig, media_path, dpi=100) 
+                    writer_mp4 = _writer_instance 
                 except Exception as e:
                     print(f"Error setting up FFMpegWriter for {media_path}: {e}. Falling back to GIF for this episode.")
-                    vis_config.output_format = 'gif' # Fallback for this episode
-                    plt.close(fig) # Close the problematic figure
-                    fig, ax = plt.subplots(figsize=vis_config.figure_size) # Recreate for GIF
-
-            # Initial frame visualization (for both GIF and MP4, MP4 just grabs it)
+                    this_episode_format = 'gif' 
+                    # plt.close(fig) # Close the problematic figure - No, keep it for GIF
+                    # fig, ax = plt.subplots(figsize=vis_config.figure_size) # Recreate for GIF
+            
             try:
-                visualize_world(world, vis_config, fig, ax) # Draw on fig, ax
-                if writer and vis_config.output_format == 'mp4': # MP4 writer exists
-                    writer.grab_frame()
-                elif vis_config.output_format == 'gif': # GIF mode
+                visualize_world(world, vis_config, fig, ax) 
+                if writer_mp4 and this_episode_format == 'mp4': 
+                    writer_mp4.grab_frame()
+                elif this_episode_format == 'gif': 
                     png_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_frame_000_initial.png"
                     png_path = os.path.join(vis_config.save_dir, png_filename)
                     fig.savefig(png_path)
@@ -1231,15 +1237,16 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
             next_state = world.step(action_normalized, training=False, terminal_step=(step == eval_config.max_steps - 1))
             reward = world.reward
             done = world.done
-            current_metric = world.performance_metric
-            episode_metrics_current.append(current_metric)
-
+            
             if eval_config.render and vis_available and fig is not None:
+                this_episode_format_render_step = current_vis_format
+                if writer_mp4 is None and this_episode_format_render_step == 'mp4':
+                     this_episode_format_render_step = 'gif'
                 try:
-                    visualize_world(world, vis_config, fig, ax) # Draw on fig, ax
-                    if writer and vis_config.output_format == 'mp4':
-                        writer.grab_frame()
-                    elif vis_config.output_format == 'gif':
+                    visualize_world(world, vis_config, fig, ax) 
+                    if writer_mp4 and this_episode_format_render_step == 'mp4':
+                        writer_mp4.grab_frame()
+                    elif this_episode_format_render_step == 'gif':
                         png_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_frame_{step+1:03d}.png"
                         png_path = os.path.join(vis_config.save_dir, png_filename)
                         fig.savefig(png_path)
@@ -1254,22 +1261,25 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
 
         # --- Episode End ---
         if eval_config.render and vis_available:
-            if writer and vis_config.output_format == 'mp4':
+            this_episode_format_finish = current_vis_format
+            if writer_mp4 is None and this_episode_format_finish == 'mp4':
+                 this_episode_format_finish = 'gif'
+
+            if writer_mp4 and this_episode_format_finish == 'mp4':
                 try:
-                    writer.finish()
+                    writer_mp4.finish()
                     print(f"  MP4 video saved: {media_path}")
                     all_episode_media_paths.append(media_path)
                 except Exception as e:
                     print(f"  Error finishing MP4 for ep {episode+1}: {e}")
-            elif vis_config.output_format == 'gif' and episode_png_frames:
+            elif this_episode_format_finish == 'gif' and episode_png_frames:
                 gif_filename = f"{algo_name}_eval_{policy_mode.lower()}_ep{episode+1}_seed{seed_to_use}.gif"
                 print(f"  Saving GIF for {algo_name.upper()} episode {episode+1} ({policy_mode}) with {len(episode_png_frames)} frames...")
-                # Pass vis_config to save_gif
                 gif_path = save_gif(output_filename=gif_filename, vis_config=vis_config, frame_paths=episode_png_frames)
                 if gif_path: all_episode_media_paths.append(gif_path)
             
             if fig is not None:
-                plt.close(fig) # Close figure after each episode
+                plt.close(fig) 
 
         final_metric = world.performance_metric
         eval_rewards.append(episode_reward)
@@ -1302,4 +1312,3 @@ def evaluate_sac(agent: SAC, config: DefaultConfig):
     print(f"--- End {algo_name.upper()} Evaluation ({policy_mode} Policy) ---\n")
 
     return eval_rewards, success_rate, avg_eval_metric
-

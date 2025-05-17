@@ -34,25 +34,8 @@ def run_experiment(config_name: str, model_path: str, num_episodes: int, max_ste
     print(f"Instantiated PPO {model_type} agent.")
 
     # --- Load Model ---
-    models_dir = config.training.models_dir # Model dir depends on the config used
-    if not os.path.isabs(model_path):
-         check_path = os.path.join(models_dir, model_path)
-         if os.path.exists(check_path):
-             model_path = check_path
-             print(f"Found model in config directory: {model_path}")
-         else:
-             # Try guessing the prefix if not provided in model_path
-             default_prefix = "ppo_rnn_" if agent.use_rnn else "ppo_mlp_"
-             if not os.path.basename(model_path).startswith("ppo_"):
-                 guessed_path = os.path.join(models_dir, f"{default_prefix}{model_path}")
-                 if os.path.exists(guessed_path):
-                      model_path = guessed_path
-                      print(f"Guessed model path in config directory: {model_path}")
-                 else:
-                      raise FileNotFoundError(f"Model file not found: {model_path}, {check_path}, or {guessed_path}")
-             else: # Prefix was provided but file not found
-                  raise FileNotFoundError(f"Model file not found: {model_path} or {check_path}")
-    elif not os.path.exists(model_path):
+    # model_path is now expected to be the full path to the .pt file.
+    if not os.path.exists(model_path):
          raise FileNotFoundError(f"Model file not found: {model_path}")
 
     print(f"Loading PPO {model_type} model from {model_path}...")
@@ -60,22 +43,24 @@ def run_experiment(config_name: str, model_path: str, num_episodes: int, max_ste
 
     print(f"\nRunning experiment with PPO {model_type} model {os.path.basename(model_path)}...")
     # evaluate_ppo handles rendering internally and logs RNN/MLP type
-    evaluate_ppo(agent=agent, config=config)
+    evaluate_ppo(agent=agent, config=config, model_path_for_eval=model_path) # Pass model_path for logging
 
     print(f"\nPPO {model_type} Experiment complete.")
     if config.evaluation.render:
+         # Evaluation visualizations are saved based on config.visualization.save_dir
+         # This might not be inside the specific training experiment folder.
          print(f"Visualizations potentially saved to '{config.visualization.save_dir}' directory (if libraries were available).")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run evaluation experiment with a trained PPO model for oil spill mapping.")
     parser.add_argument(
-        "--config", "-c", type=str, default="ppo_mlp_mapping", # Default to MLP PPO config
-        help=f"Configuration name. Available: {list(CONFIGS.keys())}"
+        "--config", "-c", type=str, default="ppo_mlp_mapping", 
+        help=f"Configuration name to load agent architecture and other settings. Available: {list(CONFIGS.keys())}"
     )
     parser.add_argument(
-        "--model", "-m", type=str, required=True, # Make model path required
-        help="Path/Name of trained PPO model checkpoint (relative to config's models_dir or absolute). E.g., 'final.pt' or 'ppo_rnn_final_ep30000_step18000000.pt'."
+        "--model", "-m", type=str, required=True, 
+        help="Full path to the trained PPO model checkpoint (.pt file). E.g., 'experiments/ppo_mlp_mapping_ppo_12345/models/ppo_mlp_final_ep30000_step18000000.pt'."
     )
     parser.add_argument(
         "--episodes", "-e", type=int, default=None, help="Number of episodes (overrides config)."

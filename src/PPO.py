@@ -64,10 +64,10 @@ class RecurrentPPOMemory:
         """Store one step of experience in the current rollout buffer."""
         # State should be the normalized basic state tuple (incl heading)
         if not isinstance(state_basic, tuple) or len(state_basic) != self.state_dim:
-             print(f"Warning (store): Invalid state_basic format. Len={len(state_basic) if isinstance(state_basic, tuple) else 'N/A'}, Expected={self.state_dim}")
+             # print(f"Warning (store): Invalid state_basic format. Len={len(state_basic) if isinstance(state_basic, tuple) else 'N/A'}, Expected={self.state_dim}")
              return
         if any(np.isnan(x) for x in state_basic):
-             print("Warning (store): NaN detected in state_basic.")
+             # print("Warning (store): NaN detected in state_basic.")
              return # Avoid storing NaN states
 
         self.rollout_states.append(np.array(state_basic, dtype=np.float32))
@@ -157,9 +157,9 @@ class RecurrentPPOMemory:
         all_returns = []
 
         # Combine all rollouts temporarily for normalization (optional but can be better)
-        flat_rewards = [r for rollout in self.memory_rewards for r in rollout]
+        flat_rewards = [r_val for rollout_rewards_list in self.memory_rewards for r_val in rollout_rewards_list] # Ensure r is scalar
         if use_reward_normalization and len(flat_rewards) > 1:
-            rewards_arr = torch.tensor(np.concatenate(flat_rewards), dtype=torch.float32, device=self.device)
+            rewards_arr = torch.tensor(np.concatenate(flat_rewards).ravel(), dtype=torch.float32, device=self.device) # Ravel
             mean = rewards_arr.mean()
             std = rewards_arr.std()
             rewards_arr = (rewards_arr - mean) / (std + 1e-8)
@@ -167,13 +167,13 @@ class RecurrentPPOMemory:
             normalized_rewards_list = torch.split(rewards_arr, [len(r) for r in self.memory_rewards])
         else:
             # Use original rewards if not normalizing or insufficient data
-            normalized_rewards_list = [torch.tensor(np.concatenate(r), dtype=torch.float32, device=self.device) for r in self.memory_rewards]
+            normalized_rewards_list = [torch.tensor(np.concatenate(r).ravel(), dtype=torch.float32, device=self.device) for r in self.memory_rewards] # Ravel
 
         # GAE Calculation per rollout
         for i in range(len(self.memory_rewards)):
             rewards = normalized_rewards_list[i]
-            values = torch.tensor(np.concatenate(self.memory_values[i]), dtype=torch.float32, device=self.device)
-            dones = torch.tensor(np.concatenate(self.memory_dones[i]), dtype=torch.float32, device=self.device)
+            values = torch.tensor(np.concatenate(self.memory_values[i]).ravel(), dtype=torch.float32, device=self.device) # Ravel
+            dones = torch.tensor(np.concatenate(self.memory_dones[i]).ravel(), dtype=torch.float32, device=self.device) # Ravel
             rollout_len = len(rewards)
             advantages = torch.zeros_like(rewards)
             last_gae_lam = 0
@@ -220,20 +220,20 @@ class RecurrentPPOMemory:
 
         # Generator for batches
         for batch_indices in batch_indices_list:
-            batch_states = [self.memory_states[i] for i in batch_indices]
-            batch_actions = [self.memory_actions[i] for i in batch_indices]
-            batch_log_probs = [self.memory_log_probs[i] for i in batch_indices]
-            batch_advantages = [advantages[i] for i in batch_indices]
-            batch_returns = [returns[i] for i in batch_indices]
+            batch_states_list = [self.memory_states[i] for i in batch_indices]
+            batch_actions_list = [self.memory_actions[i] for i in batch_indices]
+            batch_log_probs_list = [self.memory_log_probs[i] for i in batch_indices]
+            batch_advantages_list = [advantages[i] for i in batch_indices]
+            batch_returns_list = [returns[i] for i in batch_indices]
             # batch_actor_hxs = [self.memory_actor_hxs_initial[i] for i in batch_indices] # If storing initial hxs
             # batch_critic_hxs = [self.memory_critic_hxs_initial[i] for i in batch_indices]
 
             # Pad sequences and create masks
-            padded_states, mask = self._pad_sequences(batch_states)
-            padded_actions, _ = self._pad_sequences(batch_actions)
-            padded_log_probs, _ = self._pad_sequences(batch_log_probs)
-            padded_advantages, _ = self._pad_sequences(batch_advantages)
-            padded_returns, _ = self._pad_sequences(batch_returns)
+            padded_states, mask = self._pad_sequences(batch_states_list)
+            padded_actions, _ = self._pad_sequences(batch_actions_list)
+            padded_log_probs, _ = self._pad_sequences(batch_log_probs_list)
+            padded_advantages, _ = self._pad_sequences(batch_advantages_list)
+            padded_returns, _ = self._pad_sequences(batch_returns_list)
 
             yield {
                 "states": padded_states,
@@ -296,24 +296,36 @@ class PolicyNetwork(nn.Module):
         """
         if self.use_rnn and self.rnn:
             # Handle potential padding
-            if lengths is not None:
+            if lengths is not None and network_input.size(0) > 0 and lengths.size(0) > 0: # Ensure batch not empty
                 # Pack sequence -> RNN -> Unpack sequence
                 # Ensure lengths are on CPU for pack_padded_sequence
                 packed_input = pack_padded_sequence(network_input, lengths.cpu(), batch_first=True, enforce_sorted=False)
                 packed_output, final_hidden_state = self.rnn(packed_input, hidden_state)
                 rnn_output, _ = pad_packed_sequence(packed_output, batch_first=True, total_length=network_input.size(1))
-            else:
+            elif network_input.size(0) > 0: # Batch not empty, but no lengths or not using pack/pad
                 # Process full sequence (assumes no padding or handled by mask later)
                 rnn_output, final_hidden_state = self.rnn(network_input, hidden_state)
-            # rnn_output shape: (batch, seq_len, rnn_hidden_size)
+            else: # Empty batch
+                return torch.empty(0, network_input.size(1), self.action_dim, device=network_input.device), \
+                       torch.empty(0, network_input.size(1), self.action_dim, device=network_input.device), \
+                       hidden_state # Or None if appropriate
+
             mlp_input = rnn_output
         else:
             # MLP: input shape (batch, state_dim) or (batch * seq_len, state_dim)
             # If sequence, apply MLP element-wise
             if network_input.dim() == 3: # (batch, seq_len, state_dim)
                  batch, seq_len, feat_dim = network_input.shape
+                 if batch * seq_len == 0: # Handle empty sequence case
+                    return torch.empty(batch, seq_len, self.action_dim, device=network_input.device), \
+                           torch.empty(batch, seq_len, self.action_dim, device=network_input.device), \
+                           None
                  mlp_input = network_input.reshape(-1, feat_dim) # Flatten batch and seq
             else: # (batch, state_dim)
+                 if network_input.size(0) == 0: # Handle empty batch
+                    return torch.empty(0, self.action_dim, device=network_input.device), \
+                           torch.empty(0, self.action_dim, device=network_input.device), \
+                           None
                  mlp_input = network_input
             final_hidden_state = None
 
@@ -433,40 +445,38 @@ class ValueNetwork(nn.Module):
 
         if self.use_rnn and self.rnn:
             if not is_sequential:
-                # This case should ideally not happen if used correctly
-                # print("Warning: RNN ValueNetwork received non-sequential input.")
-                # You might want to reshape or raise an error depending on expected usage
-                # For now, let's assume it's intended as a single step (batch, features) -> (batch, 1, features)
                 network_input = network_input.unsqueeze(1) # Add sequence dim
-                is_sequential = True # Treat as sequence now
+                is_sequential = True 
                 seq_len = 1
 
-            # Handle potential padding
-            if lengths is not None:
+            if lengths is not None and batch_size > 0 and lengths.size(0) > 0:
                 packed_input = pack_padded_sequence(network_input, lengths.cpu(), batch_first=True, enforce_sorted=False)
                 packed_output, final_hidden_state = self.rnn(packed_input, hidden_state)
-                rnn_output, _ = pad_packed_sequence(packed_output, batch_first=True, total_length=seq_len) # Use original seq_len
-            else:
+                rnn_output, _ = pad_packed_sequence(packed_output, batch_first=True, total_length=seq_len) 
+            elif batch_size > 0:
                 rnn_output, final_hidden_state = self.rnn(network_input, hidden_state)
-            # rnn_output shape: (batch, seq_len, rnn_hidden_size)
-            mlp_input = rnn_output # MLP input comes from RNN output sequence
-        else: # MLP case
+            else: # Empty batch
+                return torch.empty(0, seq_len, 1, device=network_input.device), hidden_state
+
+            mlp_input = rnn_output 
+        else: 
             if is_sequential:
                  feat_dim = network_input.shape[2]
-                 # Flatten batch and sequence dims for MLP processing
+                 if batch_size * seq_len == 0: # Handle empty sequence
+                     return torch.empty(batch_size, seq_len, 1, device=network_input.device), None
                  mlp_input = network_input.reshape(batch_size * seq_len, feat_dim)
-            else: # Non-sequential input
-                 mlp_input = network_input # Shape (batch, state_dim)
+            else: 
+                 if batch_size == 0: # Handle empty batch
+                     return torch.empty(0,1, device=network_input.device), None
+                 mlp_input = network_input 
             final_hidden_state = None
 
         # Apply MLP layers
         x = F.relu(self.fc1(mlp_input))
         x = F.relu(self.fc2(x))
-        value = self.value(x) # Shape: (batch*seq_len, 1) if sequential, (batch, 1) otherwise
+        value = self.value(x) 
 
-        # Reshape back if the input was sequential
         if is_sequential:
-            # Reshape value from (batch*seq_len, 1) to (batch, seq_len, 1)
             value = value.reshape(batch_size, seq_len, 1)
 
         return value, final_hidden_state
@@ -596,9 +606,12 @@ class PPO:
         if self.use_state_normalization and self.state_normalizer:
             # Combine all states from memory for update
             # all_states_flat will now include the heading dimension
-            all_states_flat = np.concatenate([s for rollout in self.memory.memory_states for s in rollout])
-            if len(all_states_flat) > 0:
-                 self.state_normalizer.update(torch.from_numpy(all_states_flat).to(self.device))
+            all_states_np_list = [s_item for rollout_states_list in self.memory.memory_states for s_item in rollout_states_list]
+            if all_states_np_list:
+                all_states_flat = np.stack(all_states_np_list) # Stack list of arrays
+                if len(all_states_flat) > 0:
+                     self.state_normalizer.update(torch.from_numpy(all_states_flat).to(self.device))
+                else: print("Warning: No states in memory for normalizer update after stacking.")
             else: print("Warning: No states in memory for normalizer update.")
 
 
@@ -614,7 +627,7 @@ class PPO:
         for epoch in range(self.n_epochs):
             batch_generator = self.memory.generate_batches(advantages_list, returns_list)
             if batch_generator is None:
-                 print("Warning: PPO batch generator returned None. Skipping epoch.")
+                 # print("Warning: PPO batch generator returned None. Skipping epoch.")
                  continue
 
             for batch in batch_generator:
@@ -626,6 +639,8 @@ class PPO:
                 batch_returns = batch["returns"] # (batch_size, seq_len, 1)
                 mask = batch["mask"] # (batch_size, seq_len) float tensor (1.0 or 0.0)
                 batch_size_actual = batch_states.shape[0] # Can be smaller for last batch
+
+                if batch_size_actual == 0: continue # Skip empty batch
 
                 # Normalize advantages per batch (sequence-wise mean/std might be better)
                 flat_advantages = batch_advantages[mask > 0.5] # Select only valid steps
@@ -651,6 +666,8 @@ class PPO:
 
                 # --- PPO Loss Calculation (Masked) ---
                 mask_expanded = mask.unsqueeze(-1) # Expand mask for broadcasting: (batch, seq_len, 1)
+                
+                if mask_expanded.sum() == 0: continue # Skip if mask is all zeros
 
                 # Ratio
                 ratio = torch.exp(new_log_probs - batch_old_log_probs)
@@ -697,6 +714,7 @@ class PPO:
 
     def save_model(self, path: str):
         print(f"Saving Recurrent PPO model to {path}...")
+        os.makedirs(os.path.dirname(path), exist_ok=True) # Ensure directory exists
         save_dict = {
             'actor_state_dict': self.actor.state_dict(),
             'critic_state_dict': self.critic.state_dict(),
@@ -763,28 +781,38 @@ class PPO:
 
 
 # --- MODIFIED Training Loop (train_ppo) ---
-def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation: bool = True):
+def train_ppo(original_config_name: str, config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation: bool = True):
     ppo_config = config.ppo
     train_config = config.training
     world_config = config.world
     cuda_device = config.cuda_device
 
-    # --- Log Directory and Config Saving ---
-    # (Code unchanged)
-    name_prefix = "ppo_rnn_" if config.ppo.use_rnn else "ppo_mlp_"
-    log_dir_name = f"{name_prefix}pointcloud_{int(time.time())}"
-    log_dir = os.path.join("runs", log_dir_name)
-    os.makedirs(log_dir, exist_ok=True)
-    config_save_path = os.path.join(log_dir, "config.json")
+    # --- Experiment Directory Setup ---
+    timestamp = int(time.time())
+    # experiment_folder_name uses original_config_name (e.g., "default_mapping") and effective algorithm
+    experiment_folder_name = f"{original_config_name}_{config.algorithm}_{timestamp}"
+    base_experiments_dir = "experiments"
+    current_experiment_path = os.path.join(base_experiments_dir, experiment_folder_name)
+    
+    actual_tb_log_dir = os.path.join(current_experiment_path, "tensorboard")
+    actual_models_save_dir = os.path.join(current_experiment_path, "models")
+    
+    os.makedirs(current_experiment_path, exist_ok=True)
+    os.makedirs(actual_tb_log_dir, exist_ok=True)
+    os.makedirs(actual_models_save_dir, exist_ok=True)
+    print(f"PPO Experiment data will be saved in: {os.path.abspath(current_experiment_path)}")
+
+    # --- Config Saving ---
+    config_save_path = os.path.join(current_experiment_path, "config.json")
     try:
         with open(config_save_path, "w") as f: f.write(config.model_dump_json(indent=2))
         print(f"Configuration saved to: {config_save_path}")
     except Exception as e: print(f"Error saving configuration: {e}")
-    writer = SummaryWriter(log_dir=log_dir)
-    print(f"TensorBoard logs: {log_dir}")
+    
+    writer = SummaryWriter(log_dir=actual_tb_log_dir)
+    # print(f"TensorBoard logs: {actual_tb_log_dir}") # Covered by experiment path print
 
     # --- Device Setup ---
-    # (Code unchanged)
     device = torch.device(cuda_device if torch.cuda.is_available() and cuda_device != 'cpu' else "cpu")
     if device.type == 'cuda' and cuda_device != 'cpu':
         try:
@@ -802,30 +830,28 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                 device = torch.device("cpu")
                 print("PPO Training using CPU.")
     else:
-        device = torch.device("cpu") # Ensure device is 'cpu' if condition fails
+        device = torch.device("cpu") 
         print("PPO Training using CPU.")
 
 
     # --- Agent initialization (Pass world_config now) ---
     agent = PPO(config=ppo_config, world_config=world_config, device=device)
-    os.makedirs(train_config.models_dir, exist_ok=True)
+    # Model saving dir is now actual_models_save_dir, created above.
 
     # --- Checkpoint loading ---
-    # (Code mostly unchanged, prefix logic is handled by agent.use_rnn flag)
     model_prefix = "ppo_rnn_" if agent.use_rnn else "ppo_mlp_"
-    model_files = [f for f in os.listdir(train_config.models_dir) if f.startswith(model_prefix) and f.endswith(".pt")]
     latest_model_path = None
-    # ... (rest of checkpoint finding logic) ...
-    if model_files:
-        try: latest_model_path = max([os.path.join(train_config.models_dir, f) for f in model_files], key=os.path.getmtime)
-        except Exception as e: print(f"Could not find latest model: {e}")
+    if os.path.exists(actual_models_save_dir):
+        model_files = [f for f in os.listdir(actual_models_save_dir) if f.startswith(model_prefix) and f.endswith(".pt")]
+        if model_files:
+            try: latest_model_path = max([os.path.join(actual_models_save_dir, f) for f in model_files], key=os.path.getmtime)
+            except Exception as e: print(f"Could not find latest model in {actual_models_save_dir}: {e}")
 
     total_steps = 0
     start_episode = 1
     if latest_model_path and os.path.exists(latest_model_path):
         print(f"\nResuming PPO training from: {latest_model_path}")
         agent.load_model(latest_model_path)
-        # Estimate total steps (less critical now, but helpful for progress bar)
         try:
             parts = os.path.basename(latest_model_path).split('_')
             step_part = next((p for p in parts if p.startswith('step')), None)
@@ -835,34 +861,30 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
             print(f"Resuming at approx step {total_steps}, episode {start_episode}")
         except Exception as e: print(f"Warn: Could not parse file: {e}."); total_steps = 0; start_episode = 1
     else:
-        print("\nStarting Recurrent PPO training from scratch.")
+        print(f"\nStarting Recurrent PPO training from scratch in {actual_models_save_dir}.")
 
 
     # Training Loop
     episode_rewards = []
     timing_metrics = {'env_step_time': deque(maxlen=100), 'parameter_update_time': deque(maxlen=100)}
-    update_frequency = ppo_config.steps_per_update # This is how often we trigger the update cycle
+    update_frequency = ppo_config.steps_per_update 
     pbar = tqdm(range(start_episode, train_config.num_episodes + 1),
                 desc="Training Recurrent PPO", unit="episode", initial=start_episode-1, total=train_config.num_episodes)
 
     world = World(world_config=world_config)
-    # learn_steps = 0 # Replaced by memory length check
 
-    # Initialize reward component accumulator
     _world_reset_for_keys = world.reset()
     reward_component_accumulator = {k: [] for k in world.reward_components}
     del _world_reset_for_keys
 
-    # --- Initialize hidden states (start of training) ---
     actor_hxs, critic_hxs = None, None
     if agent.use_rnn:
         actor_hxs = agent.actor.get_initial_hidden_state(1, device)
         critic_hxs = agent.critic.get_initial_hidden_state(1, device)
 
-    state = world.reset() # Get initial state dict
+    state = world.reset() 
 
     for episode in pbar:
-        # --- Reset hidden states at the start of each episode ---
         if agent.use_rnn:
             actor_hxs = agent.actor.get_initial_hidden_state(1, device)
             critic_hxs = agent.critic.get_initial_hidden_state(1, device)
@@ -872,20 +894,15 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
         episode_metrics = []
         episode_reward_components = {k: 0.0 for k in reward_component_accumulator}
 
-        # Rollout phase (collect data up to steps_per_update)
-        # The loop structure changes slightly - we run episodes until memory is full
-        # This outer loop just controls total training duration / saving / logging
         while agent.memory.current_rollout_len < agent.memory.steps_per_update:
-            # Select action using hidden states
             action, log_prob, value, next_actor_hxs, next_critic_hxs = agent.select_action(
-                state, # state dict (incl basic_state with heading)
+                state, 
                 actor_hidden_state=actor_hxs,
                 critic_hidden_state=critic_hxs,
-                evaluate=False # Always stochastic during training rollout
+                evaluate=False
             )
 
             step_start_time = time.time()
-            # Reward calculation happens inside world.step regardless of training flag
             next_state_dict = world.step(action, training=True, terminal_step=(episode_steps == train_config.max_steps - 1))
             step_time = time.time() - step_start_time
             timing_metrics['env_step_time'].append(step_time)
@@ -894,39 +911,27 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
             done = world.done
             current_metric = world.performance_metric
 
-            # Accumulate reward components
             for key, val in world.reward_components.items():
                 if key in episode_reward_components: episode_reward_components[key] += val
 
-            # Store the transition: state is the one *before* the step
-            # Pass the basic_state tuple (incl heading)
             agent.store_step(state['basic_state'], action, log_prob, value, reward, done, actor_hxs, critic_hxs)
 
-            state = next_state_dict # state for the *next* iteration
-            actor_hxs = next_actor_hxs # Use the returned next hidden states
+            state = next_state_dict 
+            actor_hxs = next_actor_hxs 
             critic_hxs = next_critic_hxs
 
             episode_reward += reward
             episode_steps += 1
-            total_steps += 1 # Increment total environment steps
+            total_steps += 1 
             episode_metrics.append(current_metric)
 
             if done:
-                # Finalize rollout even if steps_per_update not reached
                 agent.memory.finalize_rollout()
-
-                # Store episode results
                 episode_rewards.append(episode_reward)
                 avg_metric = np.mean(episode_metrics) if episode_metrics else 0.0
                 for name, ep_total_value in episode_reward_components.items():
                     if name in reward_component_accumulator: reward_component_accumulator[name].append(ep_total_value)
-
-                # --- Logging (End of Episode within update cycle) ---
-                if episode % train_config.log_frequency == 0:
-                   # Log less frequently now, maybe based on updates or total steps
-                   pass # Moved logging after update step
-
-                # Reset for next episode within the update cycle
+                
                 state = world.reset()
                 if agent.use_rnn:
                     actor_hxs = agent.actor.get_initial_hidden_state(1, device)
@@ -936,28 +941,18 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                 episode_metrics = []
                 episode_reward_components = {k: 0.0 for k in reward_component_accumulator}
 
-                # Check if enough data collected AFTER episode ends
                 if agent.memory.total_samples_in_memory >= agent.memory.steps_per_update:
-                    break # Break inner loop to proceed to update
+                    break 
 
-            # Check if enough data collected during the episode
             if agent.memory.total_samples_in_memory >= agent.memory.steps_per_update:
-                 # Need value of the very last state for GAE
                  with torch.no_grad():
-                      # Call select_action with evaluate=True to get value estimate without sampling
                       _, _, last_value, _, _ = agent.select_action(state, actor_hxs, critic_hxs, evaluate=True)
-                 break # Break inner loop to proceed to update
+                 break 
 
-        # --- Update Step ---
-        # Ensure we have enough data (redundant check, but safe)
         if agent.memory.total_samples_in_memory >= agent.memory.steps_per_update:
-             # Get value of the state *after* the last collected step for GAE
              with torch.no_grad():
-                  # Need to get value V(s_T+1) where T = steps_per_update
-                  # The 'state' variable holds the state after the last stored step
-                  # Call select_action with evaluate=True to get value estimate without sampling
                   _, _, last_value, _, _ = agent.select_action(state, actor_hxs, critic_hxs, evaluate=True)
-                  last_done = world.done # Use the 'done' flag from the world after the last step
+                  last_done = world.done 
 
              update_start_time = time.time()
              losses = agent.update_parameters(last_value, last_done)
@@ -967,28 +962,25 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                  writer.add_scalar('Loss/Actor', losses['actor_loss'], total_steps)
                  writer.add_scalar('Loss/Critic', losses['critic_loss'], total_steps)
                  writer.add_scalar('Policy/Entropy', losses['entropy'], total_steps)
-             # Memory is cleared inside update_parameters
 
 
-        # --- Logging (Moved outside inner loop, happens per episode pbar iteration) ---
-        current_episode_reward = episode_rewards[-1] if episode_rewards else 0.0 # Get last completed episode reward
-        current_avg_metric = np.mean(episode_metrics) if episode_metrics else 0.0 # Use metrics from last completed episode part
-        final_metric = world.performance_metric # Metric at the point logging happens
+        current_episode_reward = episode_rewards[-1] if episode_rewards else 0.0 
+        current_avg_metric = np.mean(episode_metrics) if episode_metrics else 0.0 
+        final_metric = world.performance_metric 
 
         if episode % train_config.log_frequency == 0:
-            log_step = total_steps # Log against env steps
+            log_step = total_steps 
             if timing_metrics['env_step_time']: writer.add_scalar('Time/Environment_Step_ms_Avg100', np.mean(timing_metrics['env_step_time']) * 1000, log_step)
             if timing_metrics['parameter_update_time']: writer.add_scalar('Time/Parameter_Update_ms_Avg100', np.mean(timing_metrics['parameter_update_time']) * 1000, log_step)
 
             writer.add_scalar('Reward/Episode', current_episode_reward, log_step)
-            writer.add_scalar('Steps/Episode', episode_steps, log_step) # Steps in the last part of episode
+            writer.add_scalar('Steps/Episode', episode_steps, log_step) 
             writer.add_scalar('Progress/Total_Steps', total_steps, episode)
-            writer.add_scalar('Performance/Metric_AvgEpPart', current_avg_metric, log_step) # Avg metric over last part
-            writer.add_scalar('Performance/Metric_Current', final_metric, log_step) # Current metric
+            writer.add_scalar('Performance/Metric_AvgEpPart', current_avg_metric, log_step) 
+            writer.add_scalar('Performance/Metric_Current', final_metric, log_step) 
             writer.add_scalar('Buffer/PPO_Memory_Stored_Transitions', len(agent.memory), log_step)
             if world.current_seed is not None: writer.add_scalar('Environment/Current_Seed', world.current_seed, episode)
 
-            # Log accumulated reward components
             if reward_component_accumulator:
                 avg_components_logged_this_interval = {}
                 for name, component_list in reward_component_accumulator.items():
@@ -997,20 +989,19 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                         if valid_values:
                             avg_component_value = np.mean(valid_values)
                             writer.add_scalar(f'RewardComponents_AvgEp/{name}', avg_component_value, log_step)
-                reward_component_accumulator = {k: [] for k in reward_component_accumulator} # Reset lists
+                reward_component_accumulator = {k: [] for k in reward_component_accumulator} 
 
-            # Log normalizer stats
             if agent.use_state_normalization and agent.state_normalizer and agent.state_normalizer.count > agent.state_normalizer.epsilon:
                 writer.add_scalar('Stats/PPO_Normalizer_Count', agent.state_normalizer.count.item(), log_step)
                 writer.add_scalar('Stats/PPO_Normalizer_Mean_Sensor0', agent.state_normalizer.mean[0].item(), log_step)
                 writer.add_scalar('Stats/PPO_Normalizer_Std_Sensor0', torch.sqrt(agent.state_normalizer.var[0].clamp(min=1e-8)).item(), log_step)
-                if agent.state_dim > 5: # Log X coord norm
+                if agent.state_dim > 5: 
                      writer.add_scalar('Stats/PPO_Normalizer_Mean_AgentXNorm', agent.state_normalizer.mean[5].item(), log_step)
                      writer.add_scalar('Stats/PPO_Normalizer_Std_AgentXNorm', torch.sqrt(agent.state_normalizer.var[5].clamp(min=1e-8)).item(), log_step)
-                if agent.state_dim > 6: # Log Y coord norm
+                if agent.state_dim > 6: 
                      writer.add_scalar('Stats/PPO_Normalizer_Mean_AgentYNorm', agent.state_normalizer.mean[6].item(), log_step)
                      writer.add_scalar('Stats/PPO_Normalizer_Std_AgentYNorm', torch.sqrt(agent.state_normalizer.var[6].clamp(min=1e-8)).item(), log_step)
-                if agent.state_dim > 7: # Log Heading norm
+                if agent.state_dim > 7: 
                      writer.add_scalar('Stats/PPO_Normalizer_Mean_AgentHeadingNorm', agent.state_normalizer.mean[7].item(), log_step)
                      writer.add_scalar('Stats/PPO_Normalizer_Std_AgentHeadingNorm', torch.sqrt(agent.state_normalizer.var[7].clamp(min=1e-8)).item(), log_step)
 
@@ -1019,7 +1010,6 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
             avg_reward_100 = np.mean(episode_rewards[-lookback:]) if episode_rewards else 0
             writer.add_scalar('Reward/Average_100', avg_reward_100, log_step)
 
-        # Update progress bar
         if episode % 10 == 0:
             lookback = min(10, len(episode_rewards))
             avg_reward_10 = np.mean(episode_rewards[-lookback:]) if episode_rewards else 0
@@ -1029,43 +1019,42 @@ def train_ppo(config: DefaultConfig, use_multi_gpu: bool = False, run_evaluation
                 'Metric': f"{final_metric:.3f}"
             })
 
-        # Save model periodically
         if episode % train_config.save_interval == 0 and episode > 0:
-            save_prefix = "ppo_rnn" if agent.use_rnn else "ppo_mlp"
-            save_path = os.path.join(train_config.models_dir, f"{save_prefix}_ep{episode}_step{total_steps}.pt")
+            save_path = os.path.join(actual_models_save_dir, f"{model_prefix}_ep{episode}_step{total_steps}.pt")
             agent.save_model(save_path)
 
-        # --- Early Stopping Check ---
-        # (Code unchanged)
         if train_config.enable_early_stopping and len(episode_rewards) >= train_config.early_stopping_window:
             avg_reward_window = np.mean(episode_rewards[-train_config.early_stopping_window:])
             if avg_reward_window >= train_config.early_stopping_threshold:
                 print(f"\nEarly stopping triggered at episode {episode}!")
-                save_prefix = "ppo_rnn" if agent.use_rnn else "ppo_mlp"
-                final_save_path_early = os.path.join(train_config.models_dir, f"{save_prefix}_earlystop_ep{episode}_step{total_steps}.pt")
+                final_save_path_early = os.path.join(actual_models_save_dir, f"{model_prefix}_earlystop_ep{episode}_step{total_steps}.pt")
                 agent.save_model(final_save_path_early)
                 print(f"Final model saved due to early stopping: {final_save_path_early}")
-                break # Break outer episode loop
+                pbar.close()
+                writer.close()
+                return agent, episode_rewards, current_experiment_path
 
 
     pbar.close()
     writer.close()
 
-    # Final Save
+    final_model_saved_path = None
     if episode < train_config.num_episodes:
         print(f"Recurrent PPO Training finished early at episode {episode}. Total steps: {total_steps}")
+        # final_save_path_early would have been set if early stopping occurred
+        if 'final_save_path_early' in locals(): final_model_saved_path = final_save_path_early
     else:
         print(f"Recurrent PPO Training finished. Total steps: {total_steps}")
-        save_prefix = "ppo_rnn" if agent.use_rnn else "ppo_mlp"
-        final_save_path = os.path.join(train_config.models_dir, f"{save_prefix}_final_ep{train_config.num_episodes}_step{total_steps}.pt")
-        if not (train_config.enable_early_stopping and 'final_save_path_early' in locals()):
-             agent.save_model(final_save_path)
+        final_save_path = os.path.join(actual_models_save_dir, f"{model_prefix}_final_ep{train_config.num_episodes}_step{total_steps}.pt")
+        agent.save_model(final_save_path)
+        final_model_saved_path = final_save_path
+    
+    print(f"Final model saved to: {final_model_saved_path}")
 
-    if run_evaluation:
-         print("\nStarting evaluation after training...")
-         evaluate_ppo(agent=agent, config=config) # Pass full config
+    # No separate evaluation call here as run_evaluation=False was passed
+    # The agent, rewards, and experiment path are returned.
 
-    return agent, episode_rewards
+    return agent, episode_rewards, current_experiment_path
 
 
 def evaluate_ppo(agent: PPO, config: DefaultConfig, model_path_for_eval: Optional[str] = None):
@@ -1124,7 +1113,6 @@ def evaluate_ppo(agent: PPO, config: DefaultConfig, model_path_for_eval: Optiona
 
     eval_seeds = world_config.seeds
     num_eval_episodes = eval_config.num_episodes
-    # ... (seed generation/adjustment logic remains the same) ...
     if len(eval_seeds) < num_eval_episodes:
          print(f"Warning: Seed count ({len(eval_seeds)}) < num_episodes ({num_eval_episodes}). Generating additional seeds.")
          eval_seeds.extend([random.randint(0, 2**32 - 1) for _ in range(num_eval_episodes - len(eval_seeds))])
@@ -1144,16 +1132,17 @@ def evaluate_ppo(agent: PPO, config: DefaultConfig, model_path_for_eval: Optiona
             critic_hxs = agent.critic.get_initial_hidden_state(1, agent.device)
 
         fig, ax = None, None
-        writer_mp4 = None # Explicitly for MP4 writer
-        episode_png_frames = [] # For GIF mode
+        writer_mp4 = None 
+        episode_png_frames = [] 
 
         if eval_config.render and vis_available:
+            # Note: Evaluation media is saved based on vis_config.save_dir,
+            # not necessarily within the specific training experiment folder.
             os.makedirs(vis_config.save_dir, exist_ok=True)
             if reset_trajectories: reset_trajectories()
             
             fig, ax = plt.subplots(figsize=vis_config.figure_size)
             
-            # Determine format for *this* episode, in case of FFMpeg setup failure
             this_episode_format = current_vis_format 
 
             if this_episode_format == 'mp4':
@@ -1168,10 +1157,8 @@ def evaluate_ppo(agent: PPO, config: DefaultConfig, model_path_for_eval: Optiona
                     writer_mp4 = _writer_instance
                 except Exception as e:
                     print(f"PPO: Error setting up FFMpegWriter for {media_path}: {e}. Falling back to GIF for this episode.")
-                    this_episode_format = 'gif' # Fallback for this episode
-                    # writer_mp4 remains None
+                    this_episode_format = 'gif' 
             
-            # Initial frame visualization (for both GIF and MP4)
             try:
                 visualize_world(world, vis_config, fig, ax)
                 if writer_mp4 and this_episode_format == 'mp4':
@@ -1199,7 +1186,7 @@ def evaluate_ppo(agent: PPO, config: DefaultConfig, model_path_for_eval: Optiona
 
             if eval_config.render and vis_available and fig is not None:
                 this_episode_format_render_step = current_vis_format
-                if writer_mp4 is None and this_episode_format_render_step == 'mp4': # Check if FFMpeg failed setup
+                if writer_mp4 is None and this_episode_format_render_step == 'mp4': 
                      this_episode_format_render_step = 'gif'
 
                 try:
@@ -1220,7 +1207,6 @@ def evaluate_ppo(agent: PPO, config: DefaultConfig, model_path_for_eval: Optiona
             episode_reward_sum += reward
             if done: break
 
-        # --- Episode End & Media Saving ---
         if eval_config.render and vis_available:
             this_episode_format_finish = current_vis_format
             if writer_mp4 is None and this_episode_format_finish == 'mp4':
@@ -1230,7 +1216,6 @@ def evaluate_ppo(agent: PPO, config: DefaultConfig, model_path_for_eval: Optiona
             if writer_mp4 and this_episode_format_finish == 'mp4':
                 try:
                     writer_mp4.finish()
-                    # media_path was defined when writer_mp4 was set up
                     print(f"  PPO: MP4 video saved: {media_path}") 
                     all_episode_media_paths.append(media_path)
                 except Exception as e:

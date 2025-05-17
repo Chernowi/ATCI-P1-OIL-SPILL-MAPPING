@@ -110,8 +110,8 @@ class TrainingConfig(BaseModel):
 # --- Evaluation Config ---
 class EvaluationConfig(BaseModel):
     """Configuration for evaluation"""
-    num_episodes: int = Field(1, description="Number of episodes for evaluation")
-    max_steps: int = Field(350, description="Maximum steps per evaluation episode")
+    num_episodes: int = Field(6, description="Number of episodes for evaluation")
+    max_steps: int = Field(200, description="Maximum steps per evaluation episode")
     render: bool = Field(True, description="Whether to render the evaluation") # Changed default to False from image
     use_stochastic_policy_eval: bool = Field(False, description="Use stochastic policy (sample) during evaluation instead of deterministic (mean)")
 
@@ -133,9 +133,9 @@ class VisualizationConfig(BaseModel):
     """Configuration for visualization"""
     save_dir: str = Field("mapping_snapshots", description="Directory for saving visualizations")
     figure_size: tuple = Field((10, 10), description="Figure size for visualizations")
-    max_trajectory_points: int = Field(200, description="Max trajectory points to display")
+    max_trajectory_points: int = Field(5, description="Max trajectory points to display")
     
-    output_format: Literal['gif', 'mp4'] = Field('mp4', description="Output format for rendered episodes. 'mp4' requires ffmpeg.")
+    output_format: Literal['gif', 'mp4'] = Field('gif', description="Output format for rendered episodes. 'mp4' requires ffmpeg.")
     video_fps: int = Field(15, description="Frames per second for MP4 video or effective FPS for GIF.")
     delete_png_frames: bool = Field(True, description="Delete individual PNG frames after creating GIF (GIF mode only).")
 

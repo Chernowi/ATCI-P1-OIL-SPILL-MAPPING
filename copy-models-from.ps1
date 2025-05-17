@@ -1,2 +1,2 @@
-scp -r nct01026@alogin1.bsc.es:/home/nct/nct01026/ATCI-P1-BLOBTRACER/models/default_mapping/sac_ep8000_updates399265.pt "C:\Users\Pedro\Documents\MAI\ATCI\ATCI-P1-BLOBTRACER\models\sac_rnn_pointcloud\"
+scp -r nct01026@alogin1.bsc.es:/home/nct/nct01026/ATCI-P1-BLOBTRACER/models/default_mapping/sac_ep18800_updates570043.pt "C:\Users\Pedro\Documents\MAI\ATCI\ATCI-P1-BLOBTRACER\models\sac_rnn_pointcloud\"
 # models/sac_rnn_pointcloud/sac_ep12000_updates606401.pt
