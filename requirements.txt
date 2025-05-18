@@ -7,3 +7,4 @@ imageio
 Pillow
 tensorboard
 scipy
+seaborn

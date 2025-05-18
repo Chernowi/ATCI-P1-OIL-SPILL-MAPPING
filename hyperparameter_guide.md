@@ -1,326 +1,540 @@
-# Hyperparameter Tuning Guide for Oil Spill Mapping RL Agents
+# Guide to Tuning Configuration Parameters for Oil Spill RL Agent
 
-## Introduction
+This guide explains each parameter in `configs.py`, how it can be tuned, and its expected effect on the training and performance of the Reinforcement Learning agent for oil spill mapping.
 
-Hyperparameter tuning is a crucial step in getting the best performance out of Reinforcement Learning (RL) agents. Unlike model parameters learned during training (like neural network weights), hyperparameters are set *before* training starts. They define the agent's architecture, learning process, and interaction with the environment.
+## General Tuning Philosophy
 
-Finding the optimal set of hyperparameters is often an empirical process involving experimentation, careful observation, and iteration. There's rarely a single "best" set that works for all problems or even all variations of the same problem.
-
-This guide provides insights into each hyperparameter in `configs.py`, explaining its role and offering strategies for tuning.
-
-**Key Principles:**
-
-1.  **Iterative Process:** Tune one or a small group of related parameters at a time.
-2.  **Metrics are Key:** Monitor relevant metrics (e.g., episode reward, success rate, point inclusion metric, loss curves, entropy) using tools like TensorBoard.
-3.  **Understand the Trade-offs:** Many parameters involve trade-offs (e.g., learning speed vs. stability, exploration vs. exploitation).
-4.  **Start Simple:** Begin with standard values or simpler configurations before adding complexity (like PER or RNNs).
-5.  **Computational Cost:** Be mindful of the computational resources required for extensive tuning (consider tools like Optuna or Ray Tune for automated sweeps if necessary).
-6.  **Context Matters:** Optimal values depend heavily on the specific environment dynamics, reward structure, and chosen algorithm.
-
-## General Tuning Strategy
-
-1.  **Establish a Baseline:** Run training with default or standard hyperparameter values to get a baseline performance level.
-2.  **Identify Key Parameters:** Focus initial tuning efforts on parameters known to have a significant impact (e.g., learning rates, discount factor, entropy coefficient, PPO clip range, buffer size).
-3.  **Tune Systematically:**
-    *   Change one parameter (or a closely related pair, like actor/critic LRs) at a time.
-    *   Try values across a reasonable range (e.g., logarithmic scale for learning rates: 1e-5, 3e-5, 1e-4, 3e-4).
-    *   Run multiple seeds for each setting to account for randomness.
-4.  **Log Everything:** Use TensorBoard or similar tools to log metrics throughout training. Compare learning curves, final performance, and stability across different runs.
-5.  **Analyze Results:** Determine which changes improved performance based on your chosen metrics (e.g., higher average reward, faster convergence, better final performance metric, higher success rate).
-6.  **Iterate:** Based on the analysis, refine the ranges for promising parameters or move on to tuning others.
+1.  **Start with Defaults**: The provided default configurations (e.g., `default_sac_mlp`, `default_ppo_mlp`) are often good starting points.
+2.  **Tune One Thing at a Time**: Change parameters systematically to understand their individual impact.
+3.  **Monitor Learning Curves**: Use TensorBoard (or similar tools) to observe rewards, loss functions, entropy, etc. This is crucial for diagnosing issues.
+4.  **Consider Your Specific Problem**: The "best" parameters depend on the complexity of the oil spill scenarios, agent capabilities, and desired performance metrics.
+5.  **Computational Budget**: More complex models (larger networks, RNNs, larger buffers/batches) require more computation.
+6.  **Exploration vs. Exploitation**: Many parameters influence this balance. Too much exploration can lead to slow learning; too little can lead to suboptimal policies.
 
 ---
 
-## Configuration Class Details
+## Core Dimensions (Module-level constants)
 
-### `SACConfig` / `TSACConfig` (Soft Actor-Critic / Transformer SAC)
+These are generally defined by the environment's observation and action space and are **not typically tuned** unless the environment itself is fundamentally changed.
 
-These parameters control the SAC/TSAC agent's architecture and learning process.
-
-*   **`state_dim`, `action_dim`**:
-    *   **Description:** Dimensions of the environment's state and action spaces.
-    *   **Tuning:** Usually determined by the environment (`CORE_STATE_DIM`, `CORE_ACTION_DIM`) and **not tuned**. Ensure they match the `World`'s output.
-
-*   **`hidden_dims` (List[int])**:
-    *   **Description:** Defines the size and number of hidden layers in the MLP parts of the Actor and Critic networks (for SAC) or just the Actor (for TSAC).
-    *   **Tuning:** Controls network capacity.
-        *   *Start:* Common defaults like `[256, 256]` are often sufficient.
-        *   *Increase:* If the agent struggles to learn complex relationships (consistently low performance, flat losses), try increasing layer sizes (e.g., `[512, 512]`) or adding a layer (e.g., `[256, 256, 256]`). Be cautious of overfitting and increased computation.
-        *   *Decrease:* If training is slow or overfitting is suspected, try smaller layers (e.g., `[128, 128]`).
-        *   *Monitor:* Actor/Critic loss curves, overall performance.
-
-*   **`log_std_min`, `log_std_max` (int)**:
-    *   **Description:** Bounds for the logarithm of the standard deviation of the action distribution. Prevents policy from becoming too deterministic (log_std -> -inf) or too random (log_std -> +inf).
-    *   **Tuning:** Standard values (`-20`, `1` or `2`) usually work well. Significant tuning is rarely needed unless exploration is severely problematic. Adjusting might slightly influence the *range* of exploration noise.
-
-*   **`actor_lr`, `critic_lr` (float)**:
-    *   **Description:** Learning rates for the Adam optimizers of the actor and critic networks.
-    *   **Tuning:** **Crucial**. Controls how quickly network weights are updated.
-        *   *Range:* Typically `1e-5` to `1e-3`. SAC/TSAC often use lower LRs like `3e-5` to `3e-4`.
-        *   *Too High:* Can lead to instability (spiky loss curves, diverging performance).
-        *   *Too Low:* Can lead to very slow learning.
-        *   *Strategy:* Tune logarithmically (e.g., 1e-5, 3e-5, 1e-4, 3e-4). Often tuned together, keeping them equal or critic slightly higher. Monitor loss curves closely. If losses explode, decrease LR. If losses decrease extremely slowly, increase LR cautiously.
-
-*   **`gamma` (float)**:
-    *   **Description:** Discount factor for future rewards. Determines the importance of future rewards relative to immediate ones.
-    *   **Tuning:**
-        *   *Range:* `0.9` to `0.999`. Standard is `0.99`.
-        *   *Effect:* Values closer to 1 encourage far-sighted behavior, considering long-term consequences. Values closer to 0 make the agent short-sighted, focusing on immediate rewards.
-        *   *Consider:* The effective horizon of the task (`1 / (1 - gamma)`). For tasks requiring long sequences of actions (like efficient mapping), higher gamma (`0.99`, `0.995`) is usually better.
-
-*   **`tau` (float)**:
-    *   **Description:** Interpolation factor for the soft target network updates (`target_weights = tau * main_weights + (1 - tau) * target_weights`).
-    *   **Tuning:**
-        *   *Range:* Typically `0.001` to `0.01`. Standard is `0.005`.
-        *   *Effect:* Controls how quickly the target networks track the main networks. Smaller `tau` -> slower updates, more stable targets, potentially slower learning. Larger `tau` -> faster updates, less stable targets, potentially faster learning but risks instability. Usually kept at standard values unless significant stability issues arise.
-
-*   **`alpha` (float)**:
-    *   **Description:** (Initial) Temperature parameter for SAC/TSAC entropy regularization. Balances maximizing reward vs. maximizing policy entropy (encouraging exploration).
-    *   **Tuning:** Only relevant if `auto_tune_alpha` is `False`.
-        *   *Effect:* Higher `alpha` -> more exploration (policy closer to uniform random). Lower `alpha` -> less exploration (policy more deterministic).
-        *   *Strategy:* If `auto_tune_alpha=False`, tune based on observed exploration. If the agent explores too little (gets stuck), increase `alpha`. If it explores too much (acts randomly, low reward), decrease `alpha`. Monitor policy entropy if logged. **Using `auto_tune_alpha` is generally recommended.**
-
-*   **`auto_tune_alpha` (bool)**:
-    *   **Description:** Whether to automatically tune the `alpha` parameter to target a specific entropy level (`target_entropy`, usually based on action dimension).
-    *   **Tuning:** Usually set to `True`. It dynamically adjusts exploration based on policy entropy, often leading to better performance and removing the need to manually tune `alpha`. If set to `True`, `alpha` serves as the *initial* value.
-
-*   **`use_rnn` (bool) (SAC only)**:
-    *   **Description:** Whether to use RNN (LSTM/GRU) layers in the actor and critic networks. Useful for Partially Observable Markov Decision Processes (POMDPs) where history matters.
-    *   **Tuning:** Set to `True` if you believe temporal context beyond the current `trajectory_length` is important *or* if you want the network to explicitly model sequences *within* the trajectory. Set to `False` (default) for standard MLP architecture processing only the last state (or final RNN hidden state). TSAC uses a Transformer, so `use_rnn` should be `False`.
-
-*   **`rnn_type` ('lstm' or 'gru') (SAC only)**:
-    *   **Description:** Type of RNN cell if `use_rnn` is `True`.
-    *   **Tuning:** Often an empirical choice. LSTM has memory cells, potentially better for longer dependencies. GRU is simpler, potentially faster. Try both if using RNNs.
-
-*   **`rnn_hidden_size` (int) (SAC only)**:
-    *   **Description:** Number of features in the RNN hidden state.
-    *   **Tuning:** Similar to `hidden_dims`. Controls RNN capacity. Start reasonably (e.g., `128`, `256`) and adjust based on performance and computational cost.
-
-*   **`rnn_num_layers` (int) (SAC only)**:
-    *   **Description:** Number of stacked RNN layers.
-    *   **Tuning:** More layers increase capacity but also complexity and computational cost. `1` or `2` layers are common.
-
-*   **`use_state_normalization` (bool)**:
-    *   **Description:** Whether to use a `RunningMeanStd` normalizer *within the agent* on the state features received from the environment (which might already be partially normalized, like coordinates). Normalizes features to have zero mean and unit variance based on experience.
-    *   **Tuning:** Generally recommended (`True`), especially if state features have different scales (e.g., sensor readings [0,1] vs. potentially large unnormalized coordinates). It stabilizes learning. Turn `False` only if you are certain all input features are already well-scaled and stable. Monitor normalizer stats (mean, std, count) if logged.
-
-*   **`use_reward_normalization` (bool) (SAC only)**:
-    *   **Description:** Whether to normalize rewards within the batch before calculating target Q-values. Can help stabilize learning, especially if rewards have high variance or large magnitudes.
-    *   **Tuning:** Often beneficial (`True`). Can sometimes hinder learning if rewards are very sparse or already well-scaled. Try both `True` and `False`. PPO handles reward normalization differently (often within GAE).
-
-*   **`use_per` (bool)**:
-    *   **Description:** Enables Prioritized Experience Replay. Samples transitions based on their TD error (importance) rather than uniformly.
-    *   **Tuning:** Can significantly speed up learning, especially when important transitions are rare. Set to `True` to enable. Requires tuning associated `per_*` parameters. Increases computational overhead slightly.
-
-*   **`per_alpha` (float)**:
-    *   **Description:** PER exponent `alpha`. Controls how much prioritization is used (0: uniform sampling, 1: full prioritization based on TD error rank).
-    *   **Tuning:**
-        *   *Range:* `0.5` to `0.8`. Common start: `0.6`.
-        *   *Effect:* Higher `alpha` focuses more strongly on high-error samples. Too high might lead to overfitting on outliers. Tune based on stability and learning speed.
-
-*   **`per_beta_start` (float)**:
-    *   **Description:** PER initial value for importance sampling exponent `beta`. Anneals towards 1.0 over `per_beta_frames`. Corrects bias introduced by non-uniform sampling.
-    *   **Tuning:**
-        *   *Range:* `0.4` to `0.6`. Common start: `0.4`.
-        *   *Effect:* Controls the amount of importance sampling correction early in training. Should anneal to 1.0 for unbiased estimates eventually. Standard values usually work well.
-
-*   **`per_beta_frames` (int)**:
-    *   **Description:** Number of *training updates* over which `beta` anneals from `per_beta_start` to 1.0.
-    *   **Tuning:** Set based on the expected length of training (in terms of updates). Should be long enough for `beta` to reach 1.0 before training converges. E.g., `100,000` to `1,000,000`. Monitor the `beta` value in logs.
-
-*   **`per_epsilon` (float)**:
-    *   **Description:** Small positive value added to priorities to ensure even transitions with zero TD error have a non-zero chance of being sampled.
-    *   **Tuning:** Usually kept at a small value like `1e-5` or `1e-6`. Not typically tuned unless numerical issues arise.
-
-*   **`embedding_dim` (int) (TSAC only)**:
-    *   **Description:** Dimensionality of the embeddings used for states and actions within the Transformer Critic.
-    *   **Tuning:** Controls capacity of the embedding layers. Related to `transformer_hidden_dim`. Start reasonably (e.g., `128`, `256`). Tune based on performance and computational cost.
-
-*   **`transformer_n_layers`, `transformer_n_heads`, `transformer_hidden_dim` (int) (TSAC only)**:
-    *   **Description:** Core parameters of the Transformer Encoder layers in the Critic. Control its capacity and complexity. `n_heads` must be a divisor of `embedding_dim`.
-    *   **Tuning:** Sensitive parameters.
-        *   *Start:* Begin with smaller values (e.g., `n_layers=2`, `n_heads=4`, `hidden_dim=256` or `512`).
-        *   *Increase:* If critic loss remains high or performance plateaus, cautiously increase complexity (more layers, heads, or hidden dim). Monitor VRAM usage and training time.
-        *   *Monitor:* Critic loss curves. Ensure they are decreasing.
-
-*   **`use_layer_norm_actor` (bool) (TSAC only)**:
-    *   **Description:** Whether to apply Layer Normalization within the Actor's MLP layers.
-    *   **Tuning:** Often helps stabilize training (`True`). Try `False` only if experiencing issues potentially related to normalization.
-
-### `PPOConfig` (Proximal Policy Optimization)
-
-*   **`state_dim`, `action_dim`**:
-    *   **Description:** Environment dimensions.
-    *   **Tuning:** Fixed by the environment.
-
-*   **`hidden_dim` (int)**:
-    *   **Description:** Size of hidden layers in Actor and Critic MLPs.
-    *   **Tuning:** Similar to SAC `hidden_dims`. `256` is a common starting point. Adjust based on problem complexity and performance.
-
-*   **`log_std_min`, `log_std_max` (int)**:
-    *   **Description:** Bounds for the learned log standard deviation parameter in the policy.
-    *   **Tuning:** Similar to SAC. Standard values (`-20`, `2`) usually work.
-
-*   **`actor_lr`, `critic_lr` (float)**:
-    *   **Description:** Learning rates for Actor and Critic.
-    *   **Tuning:** **Crucial**. PPO often tolerates slightly higher LRs than SAC.
-        *   *Range:* `1e-5` to `5e-4`. Common start: `1e-4` or `3e-4`.
-        *   *Strategy:* Tune logarithmically. Monitor actor/critic losses and policy entropy. Ensure stability.
-
-*   **`gamma` (float)**:
-    *   **Description:** Discount factor.
-    *   **Tuning:** Same as SAC. Usually `0.99`.
-
-*   **`gae_lambda` (float)**:
-    *   **Description:** Lambda parameter for Generalized Advantage Estimation (GAE). Trades off bias and variance in advantage estimates.
-    *   **Tuning:**
-        *   *Range:* `0.9` to `1.0`. Common default: `0.95`.
-        *   *Effect:* `lambda=1` is high variance (Monte Carlo returns). `lambda=0` is high bias (TD(0) error). `0.95`-`0.98` often provides a good balance.
-
-*   **`policy_clip` (float)**:
-    *   **Description:** PPO's clipping parameter (`epsilon`). Restricts the change in the policy during updates to prevent large, destabilizing steps.
-    *   **Tuning:** **Crucial PPO parameter.**
-        *   *Range:* `0.1` to `0.3`. Common default: `0.2`.
-        *   *Effect:* Smaller values -> smaller policy updates, potentially more stable but slower learning. Larger values -> larger policy updates, potentially faster learning but risks instability.
-        *   *Strategy:* Start with `0.2`. If updates seem unstable (losses spike, performance collapses), decrease to `0.15` or `0.1`. If learning is stable but slow, cautiously increase to `0.25` or `0.3`. Monitor approximate KL divergence between old and new policies (if logged) - it should stay relatively small.
-
-*   **`n_epochs` (int)**:
-    *   **Description:** Number of optimization epochs to run on the collected batch of data (`steps_per_update`) during each PPO update cycle.
-    *   **Tuning:**
-        *   *Range:* `3` to `20`. Common: `10`.
-        *   *Effect:* More epochs utilize the collected data more thoroughly but increase computational cost per update cycle and risk overfitting to the current batch. Fewer epochs are faster per update but might be less sample efficient.
-        *   *Trade-off:* Balance with `steps_per_update`. Often requires joint tuning.
-
-*   **`entropy_coef` (float)**:
-    *   **Description:** Coefficient for the entropy bonus added to the PPO objective. Encourages exploration by penalizing overly deterministic policies.
-    *   **Tuning:**
-        *   *Range:* `0.0` to `0.1`. Common start: `0.01`.
-        *   *Effect:* Higher values promote more randomness (exploration). Lower values allow the policy to become more deterministic (exploitation).
-        *   *Strategy:* Monitor policy entropy (if logged). If entropy collapses too quickly and the agent gets stuck, increase the coefficient. If the agent explores too much and fails to converge, decrease it.
-
-*   **`value_coef` (float)**:
-    *   **Description:** Coefficient for the value function loss (critic loss) in the total PPO loss.
-    *   **Tuning:** Standard value is `0.5`. Usually kept fixed unless the value loss dominates or becomes negligible compared to the policy loss. Adjust if critic learning seems problematic.
-
-*   **`batch_size` (int)**:
-    *   **Description:** **Mini-batch size** used within each PPO optimization epoch. *Not* the total data collected per update. Must be less than or equal to `steps_per_update`.
-    *   **Tuning:**
-        *   *Range:* `32` to `512`. Common: `64`, `128`.
-        *   *Effect:* Smaller mini-batches lead to noisier gradient estimates but can sometimes escape local optima. Larger mini-batches provide more stable gradients. Ensure `steps_per_update` is divisible by `batch_size` for efficient processing.
-
-*   **`steps_per_update` (int)**:
-    *   **Description:** Number of environment steps (transitions) collected between each PPO policy update. Defines the size of the rollout buffer.
-    *   **Tuning:**
-        *   *Range:* `512` to `8192` or more. Common: `2048`, `4096`.
-        *   *Effect:* Larger values provide more data for each update, leading to more stable estimates of advantages and value targets, but updates are less frequent. Smaller values lead to more frequent updates but potentially higher variance.
-        *   *Trade-off:* Balance stability, sample efficiency, and wall-clock time. Must be >= `batch_size`.
-
-*   **`use_state_normalization`, `use_reward_normalization` (bool)**:
-    *   **Description:** Use `RunningMeanStd` for states and normalize rewards (typically by batch std dev within GAE calculation).
-    *   **Tuning:** Similar to SAC. Generally recommended (`True`) for PPO to stabilize learning. Monitor normalizer stats and ensure rewards aren't scaled down excessively if they are already small.
-
-### `ReplayBufferConfig`
-
-*   **`capacity` (int)**:
-    *   **Description:** Maximum number of transitions (SAC/TSAC) or trajectories stored in the replay buffer.
-    *   **Tuning:**
-        *   *Range:* `1e5` to `2e6`. Common: `1e6`.
-        *   *Effect:* Larger capacity stores more diverse, older data, reducing correlation but potentially slowing learning from recent experience and increasing memory usage. Smaller capacity focuses on recent data but might lead to catastrophic forgetting or instability due to correlated samples.
-        *   *Strategy:* Choose based on memory constraints and observed stability. Ensure `learning_starts` allows the buffer to fill adequately before training starts.
-
-*   **`gamma` (float)**:
-    *   **Description:** Discount factor (should match agent's gamma).
-    *   **Tuning:** Not tuned independently here; set by the agent's config. (Note: Duplication exists in the provided `configs.py`).
-
-### `MapperConfig`
-
-*   **`min_oil_points_for_estimate` (int)**:
-    *   **Description:** Minimum number of unique sensor locations detecting oil required before the `Mapper` attempts to compute a Convex Hull estimate.
-    *   **Tuning:** Domain-specific.
-        *   *Effect:* Lower values (e.g., 3) allow estimates sooner but might be unstable/inaccurate initially. Higher values (e.g., 5, 10) delay the estimate until more data is gathered, potentially leading to a more stable first estimate but incurring an `uninitialized_mapper_penalty` for longer.
-        *   *Strategy:* Tune based on how critical an early estimate is versus initial stability. Visual inspection during evaluation can help. Depends on sensor density and spill characteristics.
-
-### `TrainingConfig`
-
-*   **`num_episodes` (int)**:
-    *   **Description:** Total number of episodes to train for.
-    *   **Tuning:** Not a typical hyperparameter. Set based on observing convergence on the learning curve (e.g., when performance plateaus) and computational budget.
-
-*   **`max_steps` (int)**:
-    *   **Description:** Maximum number of steps allowed per episode.
-    *   **Tuning:** Affects episode length.
-        *   *Effect:* Longer episodes allow more time for exploration and achieving goals but can slow down learning (fewer episode resets). Shorter episodes provide faster learning signals (rewards/termination) but might prevent the agent from reaching distant goals.
-        *   *Strategy:* Ensure it's long enough for the agent to potentially solve the task. Consider the impact on credit assignment (related to `gamma`).
-
-*   **`batch_size` (int)**:
-    *   **Description:** Batch size for SAC/TSAC updates (sampling from replay buffer). **Note:** PPO uses `PPOConfig.batch_size` for its mini-batch size during optimization epochs.
-    *   **Tuning (SAC/TSAC):**
-        *   *Range:* `128` to `1024`. Common: `256`, `512`.
-        *   *Effect:* Larger batches provide more stable gradient estimates but require more computation per update. Smaller batches are faster per update but have noisier gradients. Often tuned in conjunction with learning rates.
-
-*   **`save_interval`, `log_frequency` (int)**:
-    *   **Description:** Frequency (in episodes) for saving model checkpoints and logging to TensorBoard.
-    *   **Tuning:** Convenience parameters. Set based on desired monitoring frequency and storage space. Do not directly impact performance.
-
-*   **`models_dir` (str)**:
-    *   **Description:** Directory path for saving models.
-    *   **Tuning:** Convenience parameter.
-
-*   **`learning_starts` (int)**:
-    *   **Description:** Number of environment steps to collect randomly before starting SAC/TSAC training updates. Allows the replay buffer to populate.
-    *   **Tuning (SAC/TSAC):**
-        *   *Range:* `batch_size` up to `50,000` or more. Common: `1000` to `10000`.
-        *   *Effect:* Ensures initial updates use diverse data. Too small -> updates on highly correlated data initially, potentially unstable. Too large -> delays learning unnecessarily.
-
-*   **`train_freq` (int)**:
-    *   **Description:** Frequency (in environment steps) at which SAC/TSAC training updates are performed.
-    *   **Tuning (SAC/TSAC):**
-        *   *Range:* `1` to `10` or higher.
-        *   *Effect:* `train_freq=1` means update after every environment step (most computationally intensive, potentially most sample efficient). Higher values reduce computation but update the policy less frequently.
-
-*   **`gradient_steps` (int)**:
-    *   **Description:** Number of gradient updates performed each time the `train_freq` condition is met (for SAC/TSAC).
-    *   **Tuning (SAC/TSAC):**
-        *   *Effect:* `gradient_steps=1` is standard. Values > 1 mean performing multiple updates using the same batch(es) sampled when the `train_freq` occurred. Can increase computational load per interaction but might improve learning speed if `train_freq > 1`. Often kept at `1`.
-
-### `EvaluationConfig`
-
-*   **`num_episodes`, `max_steps` (int)**:
-    *   **Description:** Parameters controlling the evaluation process.
-    *   **Tuning:** Set based on desired statistical significance and evaluation time constraints. Higher `num_episodes` gives more reliable performance estimates. `max_steps` should generally match or exceed the training `max_steps`.
-
-*   **`render` (bool)**:
-    *   **Description:** Whether to render the environment during evaluation (requires visualization libraries).
-    *   **Tuning:** Convenience/Debugging. Set `True` to watch the agent's behavior.
-
-### `VisualizationConfig`
-
-*   **All parameters (`save_dir`, `figure_size`, etc.)**:
-    *   **Description:** Control the output of visualizations.
-    *   **Tuning:** Convenience/Aesthetics. Adjust for desired output format and clarity. Do not directly impact agent performance.
-
-### `WorldConfig` (Environment Parameters - Tuning these changes the *problem*)
-
-It's crucial to distinguish between agent hyperparameters and environment parameters. Tuning `WorldConfig` parameters changes the task the agent is trying to solve. If you change these, you will likely need to retune the *agent's* hyperparameters.
-
-*   **`dt`, `agent_speed`, `yaw_angle_range`, `num_sensors`, `sensor_distance`, `sensor_radius`**: Define the physics and agent capabilities. Changing these alters task difficulty and dynamics.
-*   **`normalize_coords`**: Should generally be `True` for stable NN inputs.
-*   **`agent_initial_location`, `randomize_agent_initial_location`, `agent_randomization_ranges`**: Control starting conditions and generalization requirements. Randomization (`True`) is vital for training robust agents. Ranges define the state space explored.
-*   **`num_oil_points`, `num_water_points`, `oil_cluster_std_dev_range`, `randomize_oil_cluster`, `oil_center_randomization_range`, `initial_oil_center`, `initial_oil_std_dev`**: Define the oil spill characteristics (size, shape, location variability). Directly impacts task difficulty and the observations the agent receives. Randomization (`True`) is vital.
-*   **`trajectory_length`**: Defines the length of the state history provided to SAC/TSAC. Needs to be long enough to capture relevant temporal dependencies if using RNNs or Transformers. Tune based on perceived task memory requirements vs. computational cost.
-*   **`success_metric_threshold`**: Defines what constitutes "success" for the task. Set based on application requirements.
-*   **`terminate_on_success`, `terminate_out_of_bounds`**: Affect episode termination logic, influencing effective episode length and reward signals.
-*   **Reward Function Parameters (`metric_improvement_scale`, `step_penalty`, `new_oil_detection_bonus`, `out_of_bounds_penalty`, `success_bonus`, `uninitialized_mapper_penalty`)**: **Reward Engineering**. These are **extremely influential**.
-    *   **Description:** Shape the agent's behavior by defining what is "good".
-    *   **Tuning:** Requires careful iteration and observation.
-        *   *Start Simple:* Begin with only essential components (e.g., metric improvement, step penalty).
-        *   *Observe Behavior:* Does the agent explore? Does it stay within bounds? Does it try to improve the map?
-        *   *Adjust Weights:* If the agent is too slow, increase `step_penalty`. If it doesn't care about mapping, increase `metric_improvement_scale`. If it never finds oil, consider `new_oil_detection_bonus`. Use penalties (`out_of_bounds`, `uninitialized`) to discourage undesirable states. Use `success_bonus` for goal achievement.
-        *   *Balance:* Ensure components don't counteract each other excessively or create perverse incentives. Monitor the contribution of each component to the total reward in logs.
-*   **`seeds`**: Used for reproducible evaluation, not typically tuned during training setup.
+*   `CORE_STATE_DIM` (Default: 8)
+    *   **Purpose**: Dimension of the basic state tuple (sensors + normalized coordinates + normalized heading).
+    *   **Tuning**: Fixed by environment design.
+*   `CORE_ACTION_DIM` (Default: 1)
+    *   **Purpose**: Action dimension (yaw_change).
+    *   **Tuning**: Fixed by environment design.
+*   `TRAJECTORY_REWARD_DIM` (Default: 1)
+    *   **Purpose**: Dimension of the reward part in the trajectory feature vector.
+    *   **Tuning**: Fixed by environment design.
+*   `DEFAULT_TRAJECTORY_FEATURE_DIM`
+    *   **Purpose**: Calculated as `CORE_STATE_DIM + CORE_ACTION_DIM + TRAJECTORY_REWARD_DIM`. Used as the default for `WorldConfig.trajectory_feature_dim`.
+    *   **Tuning**: Derived, not directly tuned.
 
 ---
 
-## Conclusion
+## SACConfig (`sac`)
 
-Hyperparameter tuning is an art and a science. Start with sensible defaults, change parameters methodically, rely on logging and metrics, and understand the trade-offs involved. Remember that environment parameters (`WorldConfig`) change the task itself, while agent parameters (`SACConfig`, `PPOConfig`, etc.) tune the agent's learning strategy for that task. Good luck!
+Configuration for the Soft Actor-Critic (SAC) agent.
+
+*   `state_dim`, `action_dim`:
+    *   **Tuning**: Inherited from core dimensions. Not tuned directly here.
+*   `hidden_dims` (Default: `[128, 128]`)
+    *   **Purpose**: List of hidden layer dimensions for the MLP parts of actor and critic.
+    *   **Tuning**:
+        *   **Increasing neurons/layers** (e.g., `[256, 256]`, `[256, 256, 128]`): Increases model capacity. Can learn more complex functions but risks overfitting, trains slower, and requires more data.
+        *   **Decreasing neurons/layers** (e.g., `[64, 64]`): Reduces model capacity. Trains faster, less prone to overfitting on simple tasks, but may underfit complex problems.
+    *   **Effect**: Affects the agent's ability to approximate optimal policies and value functions.
+*   `log_std_min`, `log_std_max` (Defaults: -20, 1)
+    *   **Purpose**: Bounds for the logarithm of the standard deviation of the action distribution. This constrains the exploration noise.
+    *   **Tuning**:
+        *   Default values are usually robust.
+        *   **Widening the range**: Allows for potentially much larger or smaller exploration noise.
+        *   **Narrowing `log_std_max` (e.g., to 0 or -1)**: Limits maximum exploration noise, can be useful if actions are too erratic.
+        *   **Increasing `log_std_min` (e.g., to -10)**: Prevents exploration noise from becoming too small too quickly.
+    *   **Effect**: Controls the stochasticity of the policy.
+*   `actor_lr`, `critic_lr` (Defaults: 5e-5)
+    *   **Purpose**: Learning rates for the actor and critic networks.
+    *   **Tuning**:
+        *   **Typical Range**: `1e-5` to `1e-3`.
+        *   **Increasing LR**: Faster initial learning, but can become unstable or overshoot optima.
+        *   **Decreasing LR**: Slower learning, but more stable and can find better optima if given enough time.
+        *   Often, `critic_lr` can be slightly higher than or equal to `actor_lr`.
+    *   **Effect**: Determines step size during gradient descent. Critical for convergence.
+*   `gamma` (Default: 0.99)
+    *   **Purpose**: Discount factor for future rewards.
+    *   **Tuning**:
+        *   **Range**: `0.8` to `0.999`.
+        *   **Increasing `gamma` (closer to 1)**: Agent values future rewards more highly, becomes more farsighted. Suitable for tasks with delayed rewards.
+        *   **Decreasing `gamma`**: Agent prioritizes immediate rewards, becomes more shortsighted. Can be useful if future rewards are noisy or irrelevant.
+    *   **Effect**: Balances importance of immediate vs. future rewards.
+*   `tau` (Default: 0.005)
+    *   **Purpose**: Soft update rate for target networks (polyak averaging). `target_weights = tau * local_weights + (1 - tau) * target_weights`.
+    *   **Tuning**:
+        *   **Range**: `0.001` to `0.1`.
+        *   **Increasing `tau`**: Target networks update faster, making learning more responsive but potentially less stable.
+        *   **Decreasing `tau`**: Target networks update slower, leading to more stable but potentially slower learning.
+    *   **Effect**: Stability of target Q-values.
+*   `alpha` (Default: 0.2)
+    *   **Purpose**: Initial temperature parameter for entropy regularization. Balances reward maximization and policy entropy maximization (exploration).
+    *   **Tuning**:
+        *   Only relevant if `auto_tune_alpha` is `False`.
+        *   **Increasing `alpha`**: Encourages more exploration (more random actions).
+        *   **Decreasing `alpha`**: Encourages less exploration (more deterministic actions).
+    *   **Effect**: Exploration-exploitation trade-off.
+*   `auto_tune_alpha` (Default: `True`)
+    *   **Purpose**: Whether to automatically tune the `alpha` parameter.
+    *   **Tuning**:
+        *   `True`: Recommended. The agent learns the optimal `alpha`.
+        *   `False`: `alpha` is fixed to the value above. Requires manual tuning of `alpha`.
+    *   **Effect**: If `True`, adapts exploration level automatically.
+*   `use_rnn` (Default: `False`)
+    *   **Purpose**: Whether to use RNN (LSTM/GRU) layers in the actor and critic.
+    *   **Tuning**:
+        *   `True`: Agent uses past trajectory information. Good for POMDPs or when history matters. Increases model complexity and computational cost.
+        *   `False`: Agent is memoryless (uses only current state/last step of trajectory). Simpler, faster.
+    *   **Effect**: Agent's ability to use historical context.
+*   `rnn_type` (Default: 'lstm')
+    *   **Purpose**: Type of RNN cell ('lstm' or 'gru').
+    *   **Tuning**:
+        *   'lstm': Generally more powerful, can capture longer dependencies, but more parameters.
+        *   'gru': Simpler, fewer parameters, often performs comparably to LSTM, trains faster.
+    *   **Effect**: Type of recurrent processing.
+*   `rnn_hidden_size` (Default: 68)
+    *   **Purpose**: Hidden size of RNN layers.
+    *   **Tuning**: Similar to `hidden_dims`.
+        *   **Increasing**: More capacity for RNN to store/process history.
+        *   **Decreasing**: Less capacity, faster.
+    *   **Effect**: RNN's memory capacity.
+*   `rnn_num_layers` (Default: 1)
+    *   **Purpose**: Number of RNN layers.
+    *   **Tuning**:
+        *   **Increasing**: Deeper recurrent processing, more capacity.
+        *   **Decreasing (e.g., 1)**: Simpler RNN.
+    *   **Effect**: Depth of RNN.
+*   `use_state_normalization` (Default: `False`)
+    *   **Purpose**: Enable/disable state normalization using `RunningMeanStd`.
+    *   **Tuning**:
+        *   `True`: Recommended if state features have different scales or are not zero-centered. Can significantly stabilize and speed up learning.
+        *   `False`: Use raw state values.
+    *   **Effect**: Standardizes input to networks.
+*   `use_reward_normalization` (Default: `True`)
+    *   **Purpose**: Enable/disable reward normalization (by batch standard deviation). Note: SAC typically normalizes returns, not raw rewards directly in the update, but this flag could control if rewards are scaled before being used in target calculation. The current `SAC.py` normalizes rewards if this is true.
+    *   **Tuning**:
+        *   `True`: Can help stabilize learning if rewards have high variance or large magnitudes.
+        *   `False`: Use raw rewards.
+    *   **Effect**: Scales reward signals.
+*   `use_per` (Default: `False`)
+    *   **Purpose**: Enable Prioritized Experience Replay.
+    *   **Tuning**:
+        *   `True`: Samples transitions with high TD-error more frequently. Can speed up learning, especially when important transitions are rare. Adds computational overhead.
+        *   `False`: Uniform sampling from replay buffer.
+    *   **Effect**: Sampling strategy from replay buffer.
+*   `per_alpha` (Default: 0.6)
+    *   **Purpose**: PER alpha parameter. Controls how much prioritization is used (0: uniform, 1: full prioritization).
+    *   **Tuning**:
+        *   **Range**: `0.0` to `1.0`.
+        *   **Increasing**: More aggressive prioritization.
+        *   **Decreasing**: Closer to uniform sampling.
+    *   **Effect**: Degree of prioritization.
+*   `per_beta_start` (Default: 0.4)
+    *   **Purpose**: PER beta initial value. Importance-sampling exponent, anneals towards 1.0.
+    *   **Tuning**:
+        *   **Range**: `0.0` to `1.0`.
+        *   Controls bias correction. Annealing is common.
+    *   **Effect**: Initial strength of importance sampling correction.
+*   `per_beta_frames` (Default: 100000)
+    *   **Purpose**: Number of frames (timesteps or updates) over which `per_beta` anneals from `per_beta_start` to 1.0.
+    *   **Tuning**:
+        *   **Increasing**: Slower annealing.
+        *   **Decreasing**: Faster annealing.
+        *   Should generally span a significant portion of early-to-mid training.
+    *   **Effect**: Annealing schedule for PER importance sampling.
+*   `per_epsilon` (Default: 1e-5)
+    *   **Purpose**: Small value added to priorities to ensure non-zero probability for all transitions.
+    *   **Tuning**: Usually kept small. `1e-5` to `1e-6` is common.
+    *   **Effect**: Prevents transitions from having zero sampling probability.
+
+---
+
+## PPOConfig (`ppo`)
+
+Configuration for the Proximal Policy Optimization (PPO) agent.
+
+*   `state_dim`, `action_dim`:
+    *   **Tuning**: Inherited from core dimensions.
+*   `hidden_dim` (Default: 256)
+    *   **Purpose**: Hidden layer dimension for MLP parts (PPO often uses same size for actor/critic MLPs).
+    *   **Tuning**: Similar to `SACConfig.hidden_dims`, but a single value.
+        *   **Increasing**: More capacity.
+        *   **Decreasing**: Less capacity.
+    *   **Effect**: MLP capacity.
+*   `log_std_min`, `log_std_max`:
+    *   **Purpose/Tuning**: Same as in `SACConfig`.
+*   `actor_lr`, `critic_lr` (Defaults: 5e-5)
+    *   **Purpose/Tuning**: Same as in `SACConfig`.
+*   `gamma` (Default: 0.99)
+    *   **Purpose/Tuning**: Same as in `SACConfig`.
+*   `gae_lambda` (Default: 0.95)
+    *   **Purpose**: Lambda parameter for Generalized Advantage Estimation (GAE).
+    *   **Tuning**:
+        *   **Range**: `0.9` to `1.0`.
+        *   **`gae_lambda` = 1**: High variance (Monte Carlo returns for advantages).
+        *   **`gae_lambda` = 0**: High bias (TD(0) error for advantages).
+        *   Values like `0.95` to `0.98` often provide a good bias-variance trade-off.
+    *   **Effect**: Bias-variance trade-off in advantage estimation.
+*   `policy_clip` (Default: 0.2)
+    *   **Purpose**: PPO clipping parameter (`epsilon`). Limits the change in policy at each update.
+    *   **Tuning**:
+        *   **Range**: `0.1` to `0.3`.
+        *   **Increasing**: Allows larger policy updates, potentially faster learning but more risk of instability.
+        *   **Decreasing**: More conservative updates, more stable but potentially slower learning.
+    *   **Effect**: Stability of policy updates.
+*   `n_epochs` (Default: 10)
+    *   **Purpose**: Number of optimization epochs over the collected rollout data.
+    *   **Tuning**:
+        *   **Range**: `3` to `20`.
+        *   **Increasing**: More gradient updates per rollout, better sample efficiency but can lead to overfitting on the current batch of data.
+        *   **Decreasing**: Fewer updates, less risk of overfitting to current batch, but might need more rollouts overall.
+    *   **Effect**: How thoroughly each batch of experience is used.
+*   `entropy_coef` (Default: 0.25)
+    *   **Purpose**: Coefficient for the entropy bonus in the PPO loss. Encourages exploration.
+    *   **Tuning**:
+        *   **Range**: `0.0` to `0.5` (can be higher or lower depending on action space).
+        *   **Increasing**: More exploration (policy becomes more stochastic).
+        *   **Decreasing**: Less exploration. If too low, policy might become deterministic too quickly and get stuck in local optima.
+        *   Can be annealed (decreased over time).
+    *   **Effect**: Exploration level.
+*   `value_coef` (Default: 0.5)
+    *   **Purpose**: Coefficient for the value loss (critic loss) in the total PPO loss.
+    *   **Tuning**: Usually `0.5` or `1.0`.
+        *   Adjusting this can balance the importance of fitting the value function vs. improving the policy.
+    *   **Effect**: Weight of the critic's loss in the combined loss function.
+*   `batch_size` (Default: 64)
+    *   **Purpose**: For RNN PPO, this is the number of *rollouts* (sequences) processed in one training batch during the `n_epochs` of updates. For MLP PPO, this could be the number of transitions if data is flattened and shuffled. Given the current `RecurrentPPOMemory`, it's rollouts.
+    *   **Tuning**:
+        *   **Increasing**: More stable gradient estimates, but larger memory footprint and slower processing per batch.
+        *   **Decreasing**: Noisier gradients, but faster processing per batch.
+        *   Interacts with `steps_per_update`. Total samples = `batch_size * steps_per_update` if `steps_per_update` is rollout length and `batch_size` is number of parallel environments (not the case here) or number of rollouts grouped together. In this code, it's number of rollouts to make a training minibatch.
+    *   **Effect**: Stability and speed of updates.
+*   `steps_per_update` (Default: 256)
+    *   **Purpose**: Number of environment steps to collect in each rollout before performing a PPO update. This is the length of sequences stored in `RecurrentPPOMemory`.
+    *   **Tuning**:
+        *   **Increasing**: Longer rollouts, potentially better GAE estimates, but less frequent updates and policy might become stale. More memory per rollout.
+        *   **Decreasing**: Shorter rollouts, more frequent updates, but GAE estimates might be noisier.
+    *   **Effect**: Frequency of policy updates and length of experience sequences.
+*   `use_state_normalization`, `use_reward_normalization`:
+    *   **Purpose/Tuning**: Same as in `SACConfig`. PPO often benefits greatly from state normalization. Reward normalization is also common.
+*   `use_rnn`, `rnn_type`, `rnn_hidden_size`, `rnn_num_layers`:
+    *   **Purpose/Tuning**: Same as in `SACConfig`. PPO can also leverage RNNs for history dependence.
+
+---
+
+## ReplayBufferConfig (`replay_buffer`)
+
+Relevant for SAC and other off-policy algorithms.
+
+*   `capacity` (Default: 3,000,000)
+    *   **Purpose**: Maximum number of transitions stored in the replay buffer.
+    *   **Tuning**:
+        *   **Increasing**: Stores more diverse and older experiences. Can improve stability and prevent catastrophic forgetting, but requires more memory and might slow down learning if very old, irrelevant data is frequently sampled.
+        *   **Decreasing**: Uses more recent data, more responsive to changes in policy/environment, but less diverse and might overfit to recent experiences.
+    *   **Effect**: Size and diversity of stored experiences.
+*   `gamma` (Default: 0.99)
+    *   **Purpose**: Discount factor. This is somewhat redundant as agent configs also have `gamma`. Ensure consistency if used by buffer logic (e.g., for N-step returns, though not used here).
+    *   **Tuning**: Same as agent's `gamma`.
+
+---
+
+## MapperConfig (`mapper`, also in `WorldConfig.mapper_config`)
+
+Configuration for the oil spill estimation mapper.
+
+*   `min_oil_points_for_estimate` (Default: 3)
+    *   **Purpose**: Minimum number of unique oil-detecting sensor locations required to attempt a Convex Hull estimation.
+    *   **Tuning**:
+        *   **Increasing (e.g., 5, 10)**: Mapper waits for more evidence before forming an estimate. Estimates might be more robust but appear later. Could lead to an "uninitialized_mapper_penalty" for longer if the penalty is active.
+        *   **Decreasing (e.g., 2, but 3 is practical min for ConvexHull)**: Mapper forms estimates sooner with less data. Estimates might be noisy or small initially.
+    *   **Effect**: How quickly and with how much data the spill shape is estimated.
+
+---
+
+## TrainingConfig (`training`)
+
+General parameters for the training loop.
+
+*   `num_episodes` (Default: 30,000)
+    *   **Purpose**: Total number of episodes to train the agent.
+    *   **Tuning**: Increase for more training, decrease for less. Depends on task complexity and convergence speed.
+    *   **Effect**: Total training duration.
+*   `max_steps` (Default: 350)
+    *   **Purpose**: Maximum number of steps allowed per episode.
+    *   **Tuning**:
+        *   **Increasing**: Allows agent more time to solve the task or explore within an episode.
+        *   **Decreasing**: Forces episodes to end sooner. Can be useful if tasks should be solved quickly or to prevent agent from getting stuck.
+    *   **Effect**: Episode length.
+*   `batch_size` (Default: 512) - **This is for SAC updates.**
+    *   **Purpose**: Number of transitions sampled from the replay buffer for each SAC gradient update.
+    *   **Tuning**:
+        *   **Increasing**: More stable gradient estimates, but each update step takes longer.
+        *   **Decreasing**: Noisier gradients, faster updates, but might require lower learning rates.
+    *   **Effect**: Stability and speed of SAC updates.
+*   `save_interval` (Default: 200 episodes)
+    *   **Purpose**: Interval (in episodes) for saving model checkpoints.
+    *   **Tuning**: Adjust based on how frequently you want backups.
+    *   **Effect**: Checkpoint frequency.
+*   `log_frequency` (Default: 10 episodes)
+    *   **Purpose**: Frequency (in episodes) for logging metrics to TensorBoard.
+    *   **Tuning**: Adjust for desired logging granularity.
+    *   **Effect**: Logging detail.
+*   `learning_starts` (Default: 8000 steps) - **For SAC.**
+    *   **Purpose**: Number of environment steps to take (populating the replay buffer with random actions or an initial policy) before starting SAC training updates.
+    *   **Tuning**:
+        *   **Increasing**: Ensures buffer has more diverse experiences before training, can improve initial stability.
+        *   **Decreasing**: Starts learning sooner, but initial updates might be on less representative data.
+        *   Should be at least `batch_size`.
+    *   **Effect**: When SAC learning begins.
+*   `train_freq` (Default: 4 steps) - **For SAC.**
+    *   **Purpose**: Perform a training update every `train_freq` environment steps.
+    *   **Tuning**:
+        *   **Increasing**: Fewer updates relative to environment interaction, potentially more sample efficient but policy updates less frequently.
+        *   **Decreasing (e.g., 1)**: More updates, policy changes more rapidly.
+        *   Interacts with `gradient_steps`.
+    *   **Effect**: Frequency of SAC updates.
+*   `gradient_steps` (Default: 1) - **For SAC.**
+    *   **Purpose**: Number of gradient updates to perform when `train_freq` is met.
+    *   **Tuning**:
+        *   **`gradient_steps` > 1 with `train_freq` > 1**: Collect `train_freq` steps, then do `gradient_steps` updates on that data or sampled batches.
+        *   If `gradient_steps` = `train_freq` (and `train_freq` > 1), it's like doing one update per env step on average but batched.
+        *   Often kept at 1. Some algorithms (like DDPG variants) might use `gradient_steps` = `episode_length`.
+    *   **Effect**: Number of learning updates per data collection cycle.
+*   `enable_early_stopping` (Default: `False`)
+    *   **Purpose**: Whether to enable early stopping based on average reward.
+    *   **Tuning**: Set to `True` if you want training to stop once a performance threshold is met.
+    *   **Effect**: Conditional training termination.
+*   `early_stopping_threshold` (Default: 50)
+    *   **Purpose**: Average reward threshold for early stopping.
+    *   **Tuning**: Set to a desired performance level.
+    *   **Effect**: Target reward for stopping.
+*   `early_stopping_window` (Default: 50 episodes)
+    *   **Purpose**: Window size (in episodes) for averaging reward for early stopping.
+    *   **Tuning**:
+        *   **Increasing**: Smoother average, less sensitive to noisy episodes, but slower to react to true improvement.
+        *   **Decreasing**: More responsive, but more prone to premature stopping due to lucky streaks.
+    *   **Effect**: Sensitivity of early stopping.
+
+---
+
+## EvaluationConfig (`evaluation`)
+
+Parameters for the evaluation phase.
+
+*   `num_episodes` (Default: 6)
+    *   **Purpose**: Number of episodes to run for evaluation.
+    *   **Tuning**: Increase for more statistically significant evaluation results.
+    *   **Effect**: Robustness of evaluation.
+*   `max_steps` (Default: 200)
+    *   **Purpose**: Maximum steps per evaluation episode.
+    *   **Tuning**: Should be sufficient for the agent to demonstrate its learned behavior.
+    *   **Effect**: Length of evaluation episodes.
+*   `render` (Default: `True`)
+    *   **Purpose**: Whether to render evaluation episodes (generate GIFs/videos).
+    *   **Tuning**: `True` to see agent behavior, `False` for faster evaluation if visualization isn't needed.
+    *   **Effect**: Visual output during evaluation.
+*   `use_stochastic_policy_eval` (Default: `False`)
+    *   **Purpose**: Whether to use a stochastic (sampled actions) or deterministic (mean actions) policy during evaluation.
+    *   **Tuning**:
+        *   `False` (deterministic): Standard for evaluating learned policy's direct performance.
+        *   `True` (stochastic): Evaluates performance with exploration noise; can reveal robustness or how much exploration impacts outcomes.
+    *   **Effect**: Action selection mode during evaluation.
+
+---
+
+## Position, Velocity, RandomizationRange
+
+These are data structures, not directly tuned as hyperparameters, but their instances within `WorldConfig` define environment properties.
+
+---
+
+## VisualizationConfig (`visualization`)
+
+Parameters for controlling visualizations. These do **not** affect agent learning, only the output visuals.
+
+*   `save_dir` (Default: "mapping_snapshots")
+    *   **Purpose**: Directory for saving visualizations.
+*   `figure_size` (Default: (10, 10))
+    *   **Purpose**: Figure size for Matplotlib plots.
+*   `max_trajectory_points` (Default: 5)
+    *   **Purpose**: Max recent trajectory points of the agent to display.
+    *   **Tuning**: Increase for longer trails, decrease for shorter.
+*   `output_format` (Default: 'gif')
+    *   **Purpose**: 'gif' or 'mp4' for rendered episodes.
+*   `video_fps` (Default: 15)
+    *   **Purpose**: Frames per second for video/GIF.
+*   `delete_png_frames` (Default: `True`)
+    *   **Purpose**: Whether to delete individual PNG frames after GIF/video creation.
+*   `sensor_marker_size`, `sensor_color_oil`, `sensor_color_water`, `plot_oil_points`, `plot_water_points`, `point_marker_size`:
+    *   **Purpose**: Aesthetic parameters for the plot.
+
+---
+
+## WorldConfig (`world`)
+
+Crucial for defining the environment dynamics, observation space, and reward structure. Many of these parameters define the task difficulty.
+
+*   `CORE_STATE_DIM`, `CORE_ACTION_DIM`, `TRAJECTORY_REWARD_DIM`:
+    *   **Purpose**: Defaulted from global constants, can be overridden here if a specific world instance needs different core feature dimensions.
+    *   **Tuning**: Generally not tuned unless making a custom world variant.
+*   `dt` (Default: 1.0)
+    *   **Purpose**: Simulation time step.
+    *   **Tuning**:
+        *   **Increasing**: Agent covers more distance per step (if speed is constant). Can make control harder if too large.
+        *   **Decreasing**: Finer control, smoother movement, but more steps needed to cover distance.
+    *   **Effect**: Granularity of simulation.
+*   `world_size` (Default: (125.0, 125.0))
+    *   **Purpose**: Dimensions (X, Y) of the world.
+    *   **Tuning**: Defines the scale of the problem. Larger worlds might require more exploration or longer episodes.
+    *   **Effect**: Environment scale.
+*   `normalize_coords` (Default: `True`)
+    *   **Purpose**: Whether to normalize agent coordinates in the state representation to `[0, 1]`.
+    *   **Tuning**: `True` is highly recommended as it makes the learning problem easier for the NN by providing consistent input ranges.
+    *   **Effect**: Agent's coordinate representation.
+*   `agent_speed` (Default: 3 units/dt)
+    *   **Purpose**: Agent's movement speed.
+    *   **Tuning**: Critical.
+        *   **Increasing**: Agent explores faster but may overshoot targets or have difficulty with fine maneuvers.
+        *   **Decreasing**: More precise control but slower exploration.
+    *   **Effect**: Agent's movement capability.
+*   `yaw_angle_range` (Default: `(-math.pi / 6, math.pi / 6)`)
+    *   **Purpose**: Min/max change in yaw angle per step. Action output is normalized to `[-1, 1]` and then scaled by `yaw_angle_range[1]`.
+    *   **Tuning**:
+        *   **Widening range**: Agent can turn more sharply.
+        *   **Narrowing range**: Finer turning control, but slower to make large turns.
+    *   **Effect**: Agent's turning agility.
+*   `num_sensors` (Default: 5)
+    *   **Purpose**: Number of sensors on the agent.
+    *   **Tuning**:
+        *   **Increasing**: More detailed perception of the immediate surroundings. Increases state dimension.
+        *   **Decreasing**: Coarser perception.
+    *   **Effect**: Agent's perceptual acuity.
+*   `sensor_distance` (Default: 2.5 units)
+    *   **Purpose**: Distance of sensors from the agent's center.
+    *   **Tuning**:
+        *   **Increasing**: Sensors "see" further ahead/around.
+        *   **Decreasing**: Sensors detect things closer to the agent.
+    *   **Effect**: Sensor placement.
+*   `sensor_radius` (Default: 4.0 units)
+    *   **Purpose**: Detection radius of each sensor.
+    *   **Tuning**:
+        *   **Increasing**: Sensors detect oil from further away, larger field of view per sensor.
+        *   **Decreasing**: Sensors require closer proximity to detect oil.
+    *   **Effect**: Sensor sensitivity/range.
+*   `agent_initial_location` (Default: `Position(x=50, y=10)`)
+    *   **Purpose**: Default initial location if `randomize_agent_initial_location` is `False`.
+    *   **Tuning**: Set a fixed start for debugging or specific scenarios.
+*   `randomize_agent_initial_location` (Default: `True`)
+    *   **Purpose**: Whether to randomize the agent's starting position within `agent_randomization_ranges`.
+    *   **Tuning**: `True` for more diverse training starting conditions, `False` for fixed starts.
+*   `agent_randomization_ranges` (Default: `x_range=(25.0, 100.0), y_range=(25.0, 100.0)`)
+    *   **Purpose**: Min/Max X, Y ranges for randomizing agent start if enabled.
+    *   **Tuning**: Define the area where the agent can start.
+*   `num_oil_points` (Default: 200)
+    *   **Purpose**: Number of true oil spill points.
+    *   **Tuning**:
+        *   **Increasing**: Denser, potentially larger/more complex spill to map.
+        *   **Decreasing**: Sparser, potentially simpler spill.
+    *   **Effect**: Spill complexity.
+*   `num_water_points` (Default: 400)
+    *   **Purpose**: Number of non-spill area points (currently not directly used in reward or state, but could be for visualization or future features).
+    *   **Tuning**: Affects visual density if plotted.
+*   `oil_cluster_std_dev_range` (Default: `(8.0, 10.0)`)
+    *   **Purpose**: Range for standard deviation of the Gaussian cluster used to generate oil points if `randomize_oil_cluster` is `True`.
+    *   **Tuning**:
+        *   **Increasing std dev**: More spread-out, diffuse oil spills.
+        *   **Decreasing std dev**: More compact, concentrated oil spills.
+    *   **Effect**: Shape/spread of the oil spill.
+*   `randomize_oil_cluster` (Default: `True`)
+    *   **Purpose**: Whether to randomize oil center and std dev.
+    *   **Tuning**: `True` for diverse spill scenarios, `False` for fixed spills.
+*   `oil_center_randomization_range` (Default: `x_range=(25.0, 100.0), y_range=(25.0, 100.0)`)
+    *   **Purpose**: Min/Max X, Y ranges for randomizing oil cluster center.
+    *   **Tuning**: Defines where spills can appear.
+*   `initial_oil_center` (Default: `Position(x=50, y=50)`)
+    *   **Purpose**: Default oil center if not randomizing.
+*   `initial_oil_std_dev` (Default: 10.0)
+    *   **Purpose**: Default oil std dev if not randomizing.
+*   `min_initial_separation_distance` (Default: 40.0)
+    *   **Purpose**: Minimum distance between agent's starting location and the oil cluster's center.
+    *   **Tuning**:
+        *   **Increasing**: Ensures agent starts further away, potentially making the initial search harder.
+        *   **Decreasing**: Agent can start closer, potentially easier initial detection.
+    *   **Effect**: Initial difficulty of finding the spill.
+*   `trajectory_length` (Default: 10) - **For RNNs/Trajectory States**
+    *   **Purpose**: Number of past steps (N) to include in the trajectory state.
+    *   **Tuning**:
+        *   **Increasing**: Agent sees more history. Useful if long-term memory is beneficial. Increases input size to RNN.
+        *   **Decreasing**: Agent sees less history.
+    *   **Effect**: How much historical context the agent uses.
+*   `trajectory_feature_dim` (Default: `CORE_STATE_DIM + CORE_ACTION_DIM + TRAJECTORY_REWARD_DIM`)
+    *   **Purpose**: Dimension of features per step in the trajectory state. (Normalized state incl. heading + previous action + previous reward).
+    *   **Tuning**: Derived from core dimensions, not directly tuned unless modifying what's in a trajectory step.
+*   `max_steps` (Default: 350)
+    *   **Purpose**: Maximum steps per episode from the world's perspective (can differ from `TrainingConfig.max_steps` if desired, but usually aligned).
+    *   **Tuning**: Same as `TrainingConfig.max_steps`.
+*   `success_metric_threshold` (Default: 0.95)
+    *   **Purpose**: Performance metric (e.g., % points in hull) threshold for an episode to be considered a "success."
+    *   **Tuning**: Set based on desired task completion criteria. Higher is harder.
+    *   **Effect**: Definition of success.
+*   `terminate_on_success` (Default: `True`)
+    *   **Purpose**: Whether to end the episode if `success_metric_threshold` is met.
+    *   **Tuning**: `True` if task is considered solved upon success, `False` to let agent continue (e.g., for refinement or if reward structure encourages further action).
+*   `terminate_out_of_bounds` (Default: `True`)
+    *   **Purpose**: Whether to end the episode if the agent goes out of bounds.
+    *   **Tuning**: Almost always `True`.
+*   **Reward Shaping Parameters**: These are highly influential and often require careful tuning.
+    *   `metric_improvement_scale` (Default: 50.0)
+        *   **Purpose**: Scaling factor for reward based on positive change in the performance metric.
+        *   **Tuning**: Higher values give stronger positive reinforcement for improving the map.
+        *   **Effect**: Encourages improving the spill estimate.
+    *   `step_penalty` (Default: 0)
+        *   **Purpose**: Penalty applied at each step.
+        *   **Tuning**:
+            *   Small positive value (e.g., `0.01`, `0.1`): Encourages efficiency (solving in fewer steps).
+            *   Zero: No penalty for taking time.
+        *   **Effect**: Encourages shorter solutions.
+    *   `new_oil_detection_bonus` (Default: 0.0)
+        *   **Purpose**: Bonus for new oil detections by sensors (sensors that were off and are now on).
+        *   **Tuning**: Positive value rewards exploration leading to new information.
+        *   **Effect**: Encourages finding new parts of the spill.
+    *   `out_of_bounds_penalty` (Default: 20.0)
+        *   **Purpose**: Penalty for going out of world bounds.
+        *   **Tuning**: Should be significantly negative to discourage this behavior. Magnitude relative to other rewards matters.
+        *   **Effect**: Discourages leaving the designated area.
+    *   `success_bonus` (Default: 55.0)
+        *   **Purpose**: Bonus awarded upon reaching the `success_metric_threshold`.
+        *   **Tuning**: Large positive value to strongly reinforce successful task completion.
+        *   **Effect**: Reinforces achieving the main goal.
+    *   `uninitialized_mapper_penalty` (Default: 0)
+        *   **Purpose**: Penalty if the mapper has not yet formed an estimate (due to insufficient points).
+        *   **Tuning**: Small negative value can encourage the agent to quickly gather enough points to form an initial estimate.
+        *   **Effect**: Encourages initial data gathering for the mapper.
+*   `mapper_config`: Nested `MapperConfig` instance.
+*   `seeds` (Default: `[]`)
+    *   **Purpose**: List of seeds for environment generation during evaluation or specific resets. Used to ensure reproducible evaluation scenarios.
+    *   **Tuning**: Populate with specific integers for consistent testing.
+
+---
+
+## DefaultConfig (Top-Level)
+
+Container for all other configurations.
+
+*   `sac`, `ppo`, `replay_buffer`, `training`, `evaluation`, `world`, `mapper`, `visualization`: Instances of the above configurations.
+*   `cuda_device` (Default: "cuda:0")
+    *   **Purpose**: CUDA device to use (e.g., "cuda:0", "cuda:1", "cpu").
+    *   **Tuning**: Set based on available hardware. "cpu" for CPU-only training.
+    *   **Effect**: Hardware used for training.
+*   `algorithm` (Default: "sac")
+    *   **Purpose**: RL algorithm to use ("sac" or "ppo").
+    *   **Tuning**: Choose the algorithm you want to run.
+    *   **Effect**: Selects the learning algorithm.
+

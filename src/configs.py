@@ -217,11 +217,20 @@ default_sac_rnn_config = DefaultConfig()
 default_sac_rnn_config.algorithm = "sac"
 default_sac_rnn_config.sac.use_rnn = True
 
+default_ppo_rnn_config = DefaultConfig()
+default_ppo_rnn_config.algorithm = "ppo"
+default_ppo_rnn_config.sac.use_rnn = True # This was likely a typo, should be ppo.use_rnn
+# Correcting the above potential typo for default_ppo_rnn_config
+default_ppo_rnn_config.ppo.use_rnn = True # Corrected: PPO config should modify ppo.use_rnn
+default_ppo_rnn_config.sac.use_rnn = False # And ensure SAC RNN is false for this PPO specific config
+
+
 # Initialize CONFIGS dictionary
 CONFIGS: Dict[str, DefaultConfig] = {
     "default_sac_mlp": default_sac_mlp_config,
     "default_ppo_mlp": default_ppo_mlp_config,
     "default_sac_rnn": default_sac_rnn_config,
+    "default_ppo_rnn": default_ppo_rnn_config
 }
 
 # --- SAC MLP Hyperparameter Variations ---
@@ -265,12 +274,22 @@ for name_suffix, param_path, value in sac_rnn_variations_list:
     for part in parts[:-1]: attr = getattr(attr, part)
     setattr(attr, parts[-1], value); CONFIGS[config_name] = new_config
 
+# --- SAC MLP with Prioritized Experience Replay (PER) ---
+sac_mlp_per_config = default_sac_mlp_config.model_copy(deep=True)
+sac_mlp_per_config.algorithm = "sac" # Redundant as it's copied from default_sac_mlp_config, but explicit
+sac_mlp_per_config.sac.use_rnn = False # Ensure MLP
+sac_mlp_per_config.sac.use_per = True # Enable PER
+# Other PER parameters (per_alpha, per_beta_start, etc.) will use their defaults from SACConfig
+CONFIGS["sac_mlp_per"] = sac_mlp_per_config
+
+
 CONFIGS["default_mapping"] = default_sac_mlp_config
 
 # List all configuration names:
 # default_sac_mlp
 # default_ppo_mlp
 # default_sac_rnn
+# default_ppo_rnn
 # sac_mlp_actor_lr_low
 # sac_mlp_actor_lr_high
 # sac_mlp_critic_lr_low
@@ -293,4 +312,5 @@ CONFIGS["default_mapping"] = default_sac_mlp_config
 # ppo_mlp_hidden_dim_large
 # sac_rnn_rnn_hidden_size_small
 # sac_rnn_rnn_hidden_size_big
+# sac_mlp_per
 # default_mapping (alias to default_sac_mlp)
