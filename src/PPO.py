@@ -7,8 +7,6 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 import time
 from collections import deque, defaultdict
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation 
 from tqdm import tqdm
 import random
 from typing import Tuple, Optional, Union, Dict, Any, List # Added List

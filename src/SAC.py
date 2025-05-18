@@ -8,8 +8,6 @@ from torch.distributions import Normal
 import random
 import time
 from collections import deque
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from tqdm import tqdm
 import math 
 
