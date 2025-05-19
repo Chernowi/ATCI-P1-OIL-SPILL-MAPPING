@@ -68,8 +68,8 @@ The project supports two popular RL algorithms: Soft Actor-Critic (SAC) and Prox
 
 1.  **Clone the repository (if applicable)**:
     ```bash
-    git clone <your-repository-url>
-    cd <repository-name>
+    git clone https://github.com/Chernowi/ATCI-P1-OIL-SPILL-MAPPING
+    cd ATCI-P1-OIL-SPILL-MAPPING
     ```
 
 2.  **Create a virtual environment**:
