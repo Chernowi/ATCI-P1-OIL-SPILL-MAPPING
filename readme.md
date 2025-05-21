@@ -1,10 +1,17 @@
 # RL Agent for Oil Spill Mapping
 
+![this should be a gif](https://github.com/Chernowi/ATCI-P1-OIL-SPILL-MAPPING/blob/main/figures/example.gif)
+
 ## Overview
 
 This project implements Reinforcement Learning (RL) agents to control an autonomous vehicle for mapping oil spills. The agent learns to navigate an environment, use its sensors to detect oil, and build an estimate of the spill's shape using a Convex Hull-based mapper. The goal is to efficiently and accurately map the extent of the spill.
 
 The project supports two popular RL algorithms: Soft Actor-Critic (SAC) and Proximal Policy Optimization (PPO), with options for both Multi-Layer Perceptron (MLP) and Recurrent Neural Network (RNN - LSTM/GRU) architectures.
+
+You can find a pdf describing the implementation and briefly discussing results in the pdf of the [report](report/ATCI-P1-report.pdf).
+
+An interactive streamlit application to demonstrate the algorithms working in the environment is available in the following [link](https://oilspill.streamlit.app/)
+
 
 ## Features
 
