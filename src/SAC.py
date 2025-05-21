@@ -10,6 +10,8 @@ import time
 from collections import deque
 from tqdm import tqdm
 import math 
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
 # Local imports
 from world import World 
